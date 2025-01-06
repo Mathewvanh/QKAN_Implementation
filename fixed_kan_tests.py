@@ -5,10 +5,11 @@ import torch
 import numpy as np
 from typing import Tuple
 
-
+from matplotlib import pyplot as plt
 from torchvision import datasets, transforms
 
 from KAN_w_cumulative_polynomials import FixedKANConfig, FixedKAN
+from mnist_sampling_diagnostics import analyze_mnist_sample, plot_sample_distributions, compare_multiple_samples
 
 
 class TestFixedKAN(unittest.TestCase):
@@ -56,7 +57,7 @@ class TestFixedKAN(unittest.TestCase):
 
         # Create and optimize network
         kan = FixedKAN(self.config)
-        kan.optimize(x_data, y_data)
+        kan.optimize(x_data, y_data, use_quantum=True)
 
         # Make predictions
         with torch.no_grad():
@@ -246,7 +247,7 @@ class TestFixedKAN(unittest.TestCase):
         kan = FixedKAN(config)
 
         # Optimize and predict
-        kan.optimize(x_data, y_data)
+        kan.optimize(x_data, y_data, use_quantum=True)
         with torch.no_grad():
             y_pred = kan(x_data)
 
@@ -290,17 +291,20 @@ class TestFixedKAN(unittest.TestCase):
         kan.visualize_analysis(analysis, x_data, y_data)
 
     def test_mnist_classification(self):
-        """Test fitting a complex MNIST classification function with QUBO degree opimization"""
+        """Test fitting a complex MNIST classification function with QUBO degree optimization"""
         import time
         import json
-        network_shape = [784, 256,128,10]
+        network_shape = [784, 256, 128, 10]
         max_degree = 5
+        train_size = 2500
+        complexity_weight = 0.1
         experiment_config = {
             'date': datetime.now().strftime("%b-%d-%Y-%I-%M-%S"),
-            'train_size': 2500,
+            'train_size': train_size,
             'network_shape': network_shape,
             'max_degree': max_degree,
-            'test_size': 10000, #Full MNIST test set
+            'complexity_weight': complexity_weight,
+            'test_size': 10000,  # Full MNIST test set
         }
 
         start_time = time.time()
@@ -312,10 +316,33 @@ class TestFixedKAN(unittest.TestCase):
         train_dataset = datasets.MNIST(root='./data', train=True, transform=transform, download=True)
         test_dataset = datasets.MNIST(root='./data', train=False, transform=transform, download=True)
 
-        train_size = 2500
+        # Get training sample
         train_indices = torch.randperm(len(train_dataset))[:train_size]
         x_train = train_dataset.data[train_indices].reshape(-1, 784).float() / 255.0
         y_train_labels = train_dataset.targets[train_indices]
+
+        # Analyze the training sample distribution
+        print("\n=== Analyzing Training Sample Distribution ===")
+        sample_stats = analyze_mnist_sample(x_train, y_train_labels, train_dataset)
+
+        # Store sampling statistics
+        experiment_config['sampling_stats'] = {
+            'class_distribution': sample_stats['class_percentages'].tolist(),
+            'min_samples_per_class': sample_stats['statistics']['min_samples'],
+            'max_samples_per_class': sample_stats['statistics']['max_samples'],
+            'class_std_dev': sample_stats['statistics']['std_dev']
+        }
+
+        # Plot the distribution for this run
+        plt.figure(figsize=(10, 5))
+        plt.bar(range(10), sample_stats['class_percentages'])
+        plt.title('Class Distribution in Training Sample')
+        plt.xlabel('Digit Class')
+        plt.ylabel('Percentage in Sample')
+        plt.grid(True, alpha=0.3)
+        plt.show()
+
+        # Convert to one-hot
         y_train = torch.zeros((train_size, 10))
         y_train.scatter_(1, y_train_labels.unsqueeze(1), 1)
 
@@ -326,17 +353,16 @@ class TestFixedKAN(unittest.TestCase):
         config = FixedKANConfig(
             network_shape=network_shape,
             max_degree=max_degree,
+            complexity_weight=complexity_weight,
         )
         kan = FixedKAN(config)
+
         # Train on training data
         train_start = time.time()
         print("Training on training set...")
         kan.optimize(x_train, y_train)
         train_end = time.time()
         training_time = train_end - train_start
-
-        # Save model
-        torch.save(kan.state_dict(), 'models/mnist_kan.pt')
 
         # Test on both train and test sets
         with torch.no_grad():
@@ -363,8 +389,9 @@ class TestFixedKAN(unittest.TestCase):
             }
         }
 
-        # Save results
-        with open('mnist_kan_results.json', 'w') as f:
+        # Save results with timestamp
+        results_filename = f'mnist_kan_results_acc_{test_accuracy:.4f}_{datetime.now().strftime("%H-%M-%S")}.json'
+        with open(results_filename, 'w') as f:
             json.dump(results, f, indent=4)
 
         print("\nExperiment Results:")
@@ -382,27 +409,71 @@ class TestFixedKAN(unittest.TestCase):
             'results': results
         }, f'./models/mnist_kan_model_{test_accuracy:.4f}.pt')
 
-        # Visualize random samples from test set
-        import matplotlib.pyplot as plt
+        return results
+    def test_mnist_n_times(self, n:int = 5):
+        """Run MNIST test n times and analyze sampling distributions"""
 
-        # Select random indices from test set
-        test_size = len(test_dataset)
-        vis_indices = torch.randperm(test_size)[:20]  # Select 20 random samples
+        # Store results from each run
+        all_results = []
+        all_distributions = []
+        test_accuracies = []
 
-        fig, axes = plt.subplots(4, 5, figsize=(15, 12))
-        for i, ax in enumerate(axes.flat):
-            if i < 20:
-                idx = vis_indices[i]
-                # Plot image
-                ax.imshow(x_test[idx].reshape(28, 28), cmap='gray')
-                # Color based on correct/incorrect
-                color = 'green' if test_predictions[idx] == y_test_labels[idx] else 'red'
-                ax.set_title(f'True: {y_test_labels[idx].item()}\nPred: {test_predictions[idx].item()}',
-                             color=color)
-            ax.axis('off')
+        for run in range(n):
+            print(f"\n=== Run {run + 1}/{n} ===")
+            results = self.test_mnist_classification()
 
-        plt.suptitle(f'Random Test Samples (Test Accuracy: {test_accuracy.item():.4f})')
-        plt.tight_layout()
+            # Store results
+            all_results.append(results)
+            all_distributions.append(results['sampling_stats']['class_distribution'])
+            test_accuracies.append(results['metrics']['test_accuracy'])
+
+        # Analyze distributions across all runs
+        print("\n=== Analysis Across All Runs ===")
+        distributions = np.array(all_distributions)
+        accuracies = np.array(test_accuracies)
+
+        # Plot all distributions together
+        plt.figure(figsize=(15, 8))
+
+        # Plot individual runs
+        for i, (dist, acc) in enumerate(zip(distributions, accuracies)):
+            plt.plot(range(10), dist, 'o-', alpha=0.6,
+                     label=f'Run {i+1} (Acc: {acc:.3f})')
+
+        # Plot ideal distribution (10% each)
+        plt.axhline(y=10, color='k', linestyle='--', alpha=0.5, label='Ideal (10%)')
+
+        plt.title('Class Distributions Across Runs')
+        plt.xlabel('Digit Class')
+        plt.ylabel('Percentage in Sample')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
         plt.show()
+
+        # Analysis statistics
+        average_accuracy = np.mean(accuracies)
+        std_accuracy = np.std(accuracies)
+
+        print(f"\nAccuracy Statistics:")
+        print(f"Average Test Accuracy: {average_accuracy:.4f}")
+        print(f"Std Dev Accuracy: {std_accuracy:.4f}")
+
+        # Find best and worst runs
+        best_run = np.argmax(accuracies)
+        worst_run = np.argmin(accuracies)
+
+        print(f"\nBest Run ({accuracies[best_run]:.4f}):")
+        print("Class distribution:", distributions[best_run])
+
+        print(f"\nWorst Run ({accuracies[worst_run]:.4f}):")
+        print("Class distribution:", distributions[worst_run])
+
+        # Calculate class representation variation
+        class_stds = np.std(distributions, axis=0)
+        print("\nClass Variation (std dev across runs):")
+        for digit in range(10):
+            print(f"Digit {digit}: {class_stds[digit]:.2f}%")
+
+        return all_results
 if __name__ == '__main__':
     unittest.main(argv=['first-arg-is-ignored'], exit=False)
