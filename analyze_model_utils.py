@@ -231,12 +231,14 @@ if __name__ == "__main__":
     # Example usage
     model_files = [
         'models/mnist_kan_model_0.5127.pt',
-        'models/mnist_kan_model_0.2130.pt'
+        #'models/mnist_kan_model_0.2130.pt',
+        'models/mnist_kan_model_0.2671.pt',
     ]
 
     json_files = [
         'mnist_kan_results_acc_0.5127_11-37-11.json',
-        'mnist_kan_results_acc_0.2130_11-41-15.json'
+        #'mnist_kan_results_acc_0.2130_11-41-15.json',
+        'mnist_kan_results_acc_0.2671_13-37-28.json'
     ]
 
     analyze_models(model_files, json_files)

@@ -75,7 +75,7 @@ class KANNeuron(nn.Module):
             raise RuntimeError("Neuron degree not set. Run optimization first.")
         if self._coefficients is None:
             raise RuntimeError("Neuron coefficients not set. Run optimization first.")
-
+        x = torch.tanh(x)
         # Get transform
         transform = self._compute_cumulative_transform(x, self._selected_degree.item())
         # Apply stored coefficients
@@ -107,8 +107,9 @@ class KANLayer(nn.Module):
         """Get only horizontal weight parameters"""
         return [n._horizontal_weight for n in self.neurons]
 
-    def optimize_degrees(self, x_data: torch.Tensor, y_data: torch.Tensor, use_quantum: bool = False) -> None:
+    def optimize_degrees(self, x_data: torch.Tensor, y_data: torch.Tensor, complexity_weights: Dict[int, float], use_quantum: bool = False) -> None:
         """Use QUBO to select optimal degrees for each neuron
+        :param layer_idx:
         :param use_quantum:
         """
         from pyqubo import Array
@@ -309,7 +310,7 @@ class FixedKAN(nn.Module):
                                  train_loader: torch.utils.data.DataLoader,
                                  epochs:int,
                                  learning_rate:float = 0.01,
-                                 device: str = 'cuda',):
+                                 device: str = 'cpu',):
         """Train horizontal weights after QUBO optimization"""
         optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
         criterion = torch.nn.CrossEntropyLoss()
@@ -335,6 +336,10 @@ class FixedKAN(nn.Module):
         """Optimize degrees for all layers"""
         current_input = x_data
         for i, layer in enumerate(self.layers):
+            complexity_weights = {
+                d: self._calculate_layer_complexity_weight(i, d)
+                for d in range(layer.max_degree + 1)
+            }
             # For last layer use y_data, otherwise use intermediate target
             if i == len(self.layers) - 1:
                 target = y_data
@@ -342,11 +347,25 @@ class FixedKAN(nn.Module):
                 # TODO: Add intermediate target computation
                 target = y_data
 
-            layer.optimize_degrees(current_input, target, use_quantum)
+            layer.optimize_degrees(current_input, target, complexity_weights, use_quantum)
             # Update input for next layer
             with torch.no_grad():
                 current_input = layer(current_input)
+    def _calculate_layer_complexity_weight(self, layer_idx: int, degree: int) -> float:
+        """
+        Calculate complexity weight for a specific layer and degree
+        """
+        num_layers = len(self.layers)
+        # Normalize layer position to [0,1]
+        layer_pos = layer_idx / (num_layers - 1)
 
+        # Create parabolic scaling that's minimum at middle layers
+        layer_scale = 4 * (layer_pos - 0.5)**2
+
+        # Add softer degree penalty
+        degree_penalty = degree * (1 + np.log(degree + 1))
+
+        return self._complexity_weight.item() * layer_scale * degree_penalty
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through all layers"""
         current = x

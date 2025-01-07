@@ -296,10 +296,10 @@ class TestFixedKAN(unittest.TestCase):
         import json
         network_shape = [784,32,16,16,10]
         max_degree = 5
-        train_size = 1000
-        complexity_weight = 0.01
+        train_size = 10000
+        complexity_weight = 0.1
         weight_epochs = 20
-        learning_rate = 0.001
+        learning_rate = 0.002
         experiment_config = {
             'date': datetime.now().strftime("%b-%d-%Y-%I-%M-%S"),
             'train_size': train_size,
@@ -325,26 +325,6 @@ class TestFixedKAN(unittest.TestCase):
         x_train = train_dataset.data[train_indices].reshape(-1, 784).float() / 255.0
         y_train_labels = train_dataset.targets[train_indices]
 
-        # Analyze the training sample distribution
-        print("\n=== Analyzing Training Sample Distribution ===")
-        sample_stats = analyze_mnist_sample(x_train, y_train_labels, train_dataset)
-
-        # Store sampling statistics
-        experiment_config['sampling_stats'] = {
-            'class_distribution': sample_stats['class_percentages'].tolist(),
-            'min_samples_per_class': sample_stats['statistics']['min_samples'],
-            'max_samples_per_class': sample_stats['statistics']['max_samples'],
-            'class_std_dev': sample_stats['statistics']['std_dev']
-        }
-
-        # Plot the distribution for this run
-        plt.figure(figsize=(10, 5))
-        plt.bar(range(10), sample_stats['class_percentages'])
-        plt.title('Class Distribution in Training Sample')
-        plt.xlabel('Digit Class')
-        plt.ylabel('Percentage in Sample')
-        plt.grid(True, alpha=0.3)
-        plt.show()
 
         # Convert to one-hot
         y_train = torch.zeros((train_size, 10))
@@ -371,8 +351,8 @@ class TestFixedKAN(unittest.TestCase):
         train_data = torch.utils.data.TensorDataset(x_train, y_train)
         train_loader = torch.utils.data.DataLoader(train_data, batch_size=64, shuffle=True)
 
-        # Phase 2: Horizontal Weight Training
-        # print("Phase 2: Training horizontal weights...")
+        #Phase 2: Horizontal Weight Training
+        #print("Phase 2: Training horizontal weights...")
         # weight_start = time.time()
         # kan.train_horizontal_weights(
         #     train_loader=train_loader,
@@ -381,7 +361,7 @@ class TestFixedKAN(unittest.TestCase):
         # )
         # weight_end = time.time()
         # weight_time = weight_end - weight_start
-    # Test on both train and test sets
+        # Test on both train and test sets
         with torch.no_grad():
             # Training set accuracy
             y_pred_train = kan(x_train)
@@ -420,7 +400,6 @@ class TestFixedKAN(unittest.TestCase):
         print(f"Total Time: {total_time:.2f} seconds")
         print(f"Train Accuracy: {train_accuracy:.4f}")
         print(f"Test Accuracy: {test_accuracy:.4f}")
-        kan.verify_coefficients()
         # Save model
         torch.save({
             'model_state_dict': kan.state_dict(),
@@ -441,33 +420,33 @@ class TestFixedKAN(unittest.TestCase):
             print(f"\n=== Run {run + 1}/{n} ===")
             results = self.test_mnist_classification()
 
-            # Store results
+            # # Store results
             all_results.append(results)
-            all_distributions.append(results['sampling_stats']['class_distribution'])
-            test_accuracies.append(results['metrics']['test_accuracy'])
+            # all_distributions.append(results['sampling_stats']['class_distribution'])
+            # test_accuracies.append(results['metrics']['test_accuracy'])
 
         # Analyze distributions across all runs
         print("\n=== Analysis Across All Runs ===")
-        distributions = np.array(all_distributions)
+        # distributions = np.array(all_distributions)
         accuracies = np.array(test_accuracies)
 
-        # Plot all distributions together
-        plt.figure(figsize=(15, 8))
-
-        # Plot individual runs
-        for i, (dist, acc) in enumerate(zip(distributions, accuracies)):
-            plt.plot(range(10), dist, 'o-', alpha=0.6,
-                     label=f'Run {i+1} (Acc: {acc:.3f})')
-
-        # Plot ideal distribution (10% each)
-        plt.axhline(y=10, color='k', linestyle='--', alpha=0.5, label='Ideal (10%)')
-
-        plt.title('Class Distributions Across Runs')
-        plt.xlabel('Digit Class')
-        plt.ylabel('Percentage in Sample')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.show()
+        # # Plot all distributions together
+        # plt.figure(figsize=(15, 8))
+        #
+        # # Plot individual runs
+        # for i, (dist, acc) in enumerate(zip(distributions, accuracies)):
+        #     plt.plot(range(10), dist, 'o-', alpha=0.6,
+        #              label=f'Run {i+1} (Acc: {acc:.3f})')
+        #
+        # # Plot ideal distribution (10% each)
+        # plt.axhline(y=10, color='k', linestyle='--', alpha=0.5, label='Ideal (10%)')
+        #
+        # plt.title('Class Distributions Across Runs')
+        # plt.xlabel('Digit Class')
+        # plt.ylabel('Percentage in Sample')
+        # plt.legend()
+        # plt.grid(True, alpha=0.3)
+        # plt.show()
 
         # Analysis statistics
         average_accuracy = np.mean(accuracies)
@@ -482,16 +461,16 @@ class TestFixedKAN(unittest.TestCase):
         worst_run = np.argmin(accuracies)
 
         print(f"\nBest Run ({accuracies[best_run]:.4f}):")
-        print("Class distribution:", distributions[best_run])
+        #print("Class distribution:", distributions[best_run])
 
         print(f"\nWorst Run ({accuracies[worst_run]:.4f}):")
-        print("Class distribution:", distributions[worst_run])
+        #print("Class distribution:", distributions[worst_run])
 
         # Calculate class representation variation
-        class_stds = np.std(distributions, axis=0)
-        print("\nClass Variation (std dev across runs):")
-        for digit in range(10):
-            print(f"Digit {digit}: {class_stds[digit]:.2f}%")
+        #class_stds = np.std(distributions, axis=0)
+        # print("\nClass Variation (std dev across runs):")
+        # for digit in range(10):
+        #     print(f"Digit {digit}: {class_stds[digit]:.2f}%")
 
         return all_results
 if __name__ == '__main__':
