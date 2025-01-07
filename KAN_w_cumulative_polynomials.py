@@ -3,8 +3,7 @@ import torch
 import torch.nn as nn
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
-import pennylane as qml
-from fable import fable
+#from fable import fable
 from matplotlib import pyplot as plt
 from qiskit import transpile
 from qiskit_aer import AerSimulator
@@ -26,8 +25,34 @@ class KANNeuron(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.max_degree = max_degree
-        self.selected_degree = None  # Will be set by QUBO
-        self.coefficients = None #Store coefficients after optimization
+        self.horizontal_weight = nn.Parameter(torch.ones(1))
+        # Register buffers for state dict
+        self.register_buffer('_selected_degree', torch.tensor(-1))
+        self.register_buffer('_coefficients', None)
+
+    @property
+    def selected_degree(self):
+        return None if self._selected_degree.item() == -1 else self._selected_degree.item()
+
+    @selected_degree.setter
+    def selected_degree(self, value):
+        if value is None:
+            self._selected_degree = torch.tensor(-1)
+        else:
+            self._selected_degree = torch.tensor(value)
+
+    @property
+    def coefficients(self):
+        """Get coefficients from buffer"""
+        return self._coefficients
+
+    @coefficients.setter
+    def coefficients(self, value: torch.Tensor):
+        """Set coefficients and ensure they're on device"""
+        if value is not None:
+            self._coefficients = value.to(self._selected_degree.device)
+        else:
+            self._coefficients = None
     def _compute_cumulative_transform(self, x: torch.Tensor, degree: int) -> torch.Tensor:
         """Compute transforms using all polynomials up to degree"""
         transforms = []
@@ -46,15 +71,15 @@ class KANNeuron(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass using cumulative polynomials"""
-        if self.selected_degree is None:
+        if self._selected_degree is None:
             raise RuntimeError("Neuron degree not set. Run optimization first.")
-        if self.coefficients is None:
+        if self._coefficients is None:
             raise RuntimeError("Neuron coefficients not set. Run optimization first.")
 
         # Get transform
-        transform = self._compute_cumulative_transform(x, self.selected_degree)
+        transform = self._compute_cumulative_transform(x, self._selected_degree.item())
         # Apply stored coefficients
-        return transform @ self.coefficients
+        return self.horizontal_weight * (transform @ self.coefficients)
 
 
 
@@ -66,16 +91,21 @@ class KANLayer(nn.Module):
     """
     def __init__(self, input_dim: int, output_dim: int, max_degree: int, complexity_weight: float = 0.1) -> None:
         super().__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.max_degree = max_degree
-        self.complexity_weight = complexity_weight
         # Create fixed number of neurons
         self.neurons = nn.ModuleList([
             KANNeuron(input_dim, max_degree)
             for _ in range(output_dim)
         ])
-        self.last_quantum_resources = None
+        # Register all configuration as buffers
+        self.register_buffer('_input_dim', torch.tensor(input_dim))
+        self.register_buffer('_output_dim', torch.tensor(output_dim))
+        self.register_buffer('_max_degree', torch.tensor(max_degree))
+        self.register_buffer('_complexity_weight', torch.tensor(complexity_weight))
+        self.register_buffer('_last_quantum_resources', None)  # Will store as tensor when needed
+
+    def get_trainable_parameters(self) -> List[nn.Parameter]:
+        """Get only horizontal weight parameters"""
+        return [n._horizontal_weight for n in self.neurons]
 
     def optimize_degrees(self, x_data: torch.Tensor, y_data: torch.Tensor, use_quantum: bool = False) -> None:
         """Use QUBO to select optimal degrees for each neuron
@@ -170,49 +200,91 @@ class KANLayer(nn.Module):
                 resources: Dictionary containing quantum resource usage
         """
         # Convert to numpy
-        X_np = X.detach().numpy()
-        y_np = y.detach().numpy()
+        # X_np = X.detach().numpy()
+        # y_np = y.detach().numpy()
+        #
+        # # Initialize simulator
+        # simulator = AerSimulator(method='unitary')
+        #
+        # # Get block encoding of X matrix
+        # circuit_X, alpha_X = fable(X_np, 0)
+        #
+        # circuit_X = transpile(circuit_X, simulator)
+        #
+        # # Track resources from first encoding
+        # resources = {
+        #     'n_qubits': circuit_X.num_qubits,
+        #     'circuit_depth': circuit_X.depth(),
+        #     'gate_count': len(circuit_X.data),
+        #     'alpha_scaling': alpha_X
+        # }
+        #
+        # # Get unitary matrix
+        # result = simulator.run(circuit_X).result()
+        # unitary = result.get_unitary(circuit_X)
+        #
+        # # Extract encoded matrix
+        # N = X_np.shape[0]
+        # encoded_X = alpha_X * N * unitary[:N, :N]
+        #
+        # # Solve linear system classically for now
+        # # (We can replace this with quantum linear solver later)
+        # coeffs = np.linalg.solve(encoded_X, y_np)
+        #
+        # return torch.from_numpy(coeffs).float().reshape(-1, 1), resources
+    @property
+    def input_dim(self) -> int:
+        return self._input_dim.item()
 
-        # Initialize simulator
-        simulator = AerSimulator(method='unitary')
+    @property
+    def output_dim(self) -> int:
+        return self._output_dim.item()
 
-        # Get block encoding of X matrix
-        circuit_X, alpha_X = fable(X_np, 0)
+    @property
+    def max_degree(self) -> int:
+        return self._max_degree.item()
 
-        circuit_X = transpile(circuit_X, simulator)
+    @property
+    def complexity_weight(self) -> float:
+        return self._complexity_weight.item()
 
-        # Track resources from first encoding
-        resources = {
-            'n_qubits': circuit_X.num_qubits,
-            'circuit_depth': circuit_X.depth(),
-            'gate_count': len(circuit_X.data),
-            'alpha_scaling': alpha_X
-        }
+    def set_quantum_resources(self, resources: List[Dict]) -> None:
+        """Convert and store quantum resources as tensor"""
+        if resources is None:
+            self._last_quantum_resources = None
+        else:
+            # Convert dict to tensor format
+            resource_data = []
+            for r in resources:
+                resource_data.extend([
+                    r.get('n_qubits', 0),
+                    r.get('circuit_depth', 0),
+                    r.get('gate_count', 0),
+                    r.get('alpha_scaling', 0.0)
+                ])
+            self._last_quantum_resources = torch.tensor(resource_data)
 
-        # Get unitary matrix
-        result = simulator.run(circuit_X).result()
-        unitary = result.get_unitary(circuit_X)
-
-        # Extract encoded matrix
-        N = X_np.shape[0]
-        encoded_X = alpha_X * N * unitary[:N, :N]
-
-        # Solve linear system classically for now
-        # (We can replace this with quantum linear solver later)
-        coeffs = np.linalg.solve(encoded_X, y_np)
-
-        return torch.from_numpy(coeffs).float().reshape(-1, 1), resources
     def get_last_quantum_resources(self) -> Optional[List[Dict]]:
-        """Get resources from last quantum optimization, if any"""
-        return getattr(self, 'last_quantum_resources', None)
+        """Convert stored tensor back to dictionary format"""
+        if self._last_quantum_resources is None:
+            return None
+
+        resources = []
+        data = self._last_quantum_resources.tolist()
+        for i in range(0, len(data), 4):
+            resources.append({
+                'n_qubits': int(data[i]),
+                'circuit_depth': int(data[i+1]),
+                'gate_count': int(data[i+2]),
+                'alpha_scaling': float(data[i+3])
+            })
+        return resources
 class FixedKAN(nn.Module):
     """
     Complete Fixed Architecture KAN
     """
     def __init__(self, config: FixedKANConfig):
         super().__init__()
-        self.config = config
-
         # Create fixed layers
         self.layers = nn.ModuleList([
             KANLayer(
@@ -223,6 +295,41 @@ class FixedKAN(nn.Module):
             )
             for i in range(len(config.network_shape)-1)
         ])
+        self.register_buffer('_network_shape', torch.tensor(config.network_shape))
+        self.register_buffer('_max_degree', torch.tensor(config.max_degree))
+        self.register_buffer('_complexity_weight', torch.tensor(config.complexity_weight))
+    def get_trainable_parameters(self) -> List[nn.Parameter]:
+        """Get all horizontal weight parameters"""
+        params = []
+        for layer in self.layers:
+            params.extend(layer.get_trainable_parameters())
+        return params
+
+    def train_horizontal_weights(self,
+                                 train_loader: torch.utils.data.DataLoader,
+                                 epochs:int,
+                                 learning_rate:float = 0.01,
+                                 device: str = 'cuda',):
+        """Train horizontal weights after QUBO optimization"""
+        optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
+        criterion = torch.nn.CrossEntropyLoss()
+
+        self.train()
+        for epoch in range(epochs):
+            total_loss = 0
+            for batch_idx, (data, target) in enumerate(train_loader):
+                data,target = data.to(device), target.to(device)
+
+                optimizer.zero_grad()
+                output = self(data)
+                loss = criterion(output, target)
+
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item()
+            avg_loss = total_loss / len(train_loader)
+            print(f'Epoch {epoch+1}/{epochs}, avg Loss: {avg_loss:.4f}')
 
     def optimize(self, x_data: torch.Tensor, y_data: torch.Tensor, use_quantum:bool =False) -> None:
         """Optimize degrees for all layers"""
@@ -420,3 +527,53 @@ class FixedKAN(nn.Module):
 
         plt.tight_layout()
         plt.show()
+    def verify_coefficients(self):
+        """Debug method to verify coefficient storage"""
+        state = self.state_dict()
+        print("\nVerifying coefficients in state dict:")
+        for layer_idx, layer in enumerate(self.layers):
+            for neuron_idx, neuron in enumerate(layer.neurons):
+                key = f'layers.{layer_idx}.neurons.{neuron_idx}._coefficients'
+                if key in state:
+                    print(f"\nLayer {layer_idx}, Neuron {neuron_idx}:")
+                    print("In state dict:", state[key])
+                    print("In neuron:", neuron._coefficients)
+                    print("Via property:", neuron.coefficients)
+                    if not torch.equal(state[key], neuron._coefficients):
+                        print("WARNING: Mismatch between state dict and neuron!")
+                else:
+                    print(f"WARNING: Missing coefficients for Layer {layer_idx}, Neuron {neuron_idx}")
+    @property
+    def config(self) -> FixedKANConfig:
+        """Reconstruct config from buffers"""
+        return FixedKANConfig(
+            network_shape=self._network_shape.tolist(),
+            max_degree=self._max_degree.item(),
+            complexity_weight=self._complexity_weight.item()
+        )
+
+    def save_model(self, filepath: str) -> None:
+        """Save model state including all buffers"""
+        torch.save(self.state_dict(), filepath)
+
+    @classmethod
+    def load_model(cls, filepath: str) -> 'FixedKAN':
+        """Load model state including all buffers"""
+        state_dict = torch.load(filepath)
+
+        # Extract config from state dict
+        network_shape = state_dict['_network_shape'].tolist()
+        max_degree = state_dict['_max_degree'].item()
+        complexity_weight = state_dict['_complexity_weight'].item()
+
+        # Create model
+        config = FixedKANConfig(
+            network_shape=network_shape,
+            max_degree=max_degree,
+            complexity_weight=complexity_weight
+        )
+        model = cls(config)
+
+        # Load complete state
+        model.load_state_dict(state_dict)
+        return model

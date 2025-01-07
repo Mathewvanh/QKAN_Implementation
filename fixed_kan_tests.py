@@ -294,16 +294,20 @@ class TestFixedKAN(unittest.TestCase):
         """Test fitting a complex MNIST classification function with QUBO degree optimization"""
         import time
         import json
-        network_shape = [784, 256, 128, 10]
+        network_shape = [784,32,16,16,10]
         max_degree = 5
-        train_size = 2500
-        complexity_weight = 0.1
+        train_size = 1000
+        complexity_weight = 0.01
+        weight_epochs = 20
+        learning_rate = 0.001
         experiment_config = {
             'date': datetime.now().strftime("%b-%d-%Y-%I-%M-%S"),
             'train_size': train_size,
             'network_shape': network_shape,
             'max_degree': max_degree,
             'complexity_weight': complexity_weight,
+            'weight_epochs': weight_epochs,
+            'learning_rate': learning_rate,
             'test_size': 10000,  # Full MNIST test set
         }
 
@@ -358,13 +362,26 @@ class TestFixedKAN(unittest.TestCase):
         kan = FixedKAN(config)
 
         # Train on training data
-        train_start = time.time()
-        print("Training on training set...")
+        structure_start = time.time()
+        print("Phase 1: Optimizing network structure with QUBO...")
         kan.optimize(x_train, y_train)
-        train_end = time.time()
-        training_time = train_end - train_start
+        structure_end = time.time()
+        structure_time = structure_end - structure_start
 
-        # Test on both train and test sets
+        train_data = torch.utils.data.TensorDataset(x_train, y_train)
+        train_loader = torch.utils.data.DataLoader(train_data, batch_size=64, shuffle=True)
+
+        # Phase 2: Horizontal Weight Training
+        # print("Phase 2: Training horizontal weights...")
+        # weight_start = time.time()
+        # kan.train_horizontal_weights(
+        #     train_loader=train_loader,
+        #     epochs=weight_epochs,
+        #     learning_rate=learning_rate
+        # )
+        # weight_end = time.time()
+        # weight_time = weight_end - weight_start
+    # Test on both train and test sets
         with torch.no_grad():
             # Training set accuracy
             y_pred_train = kan(x_train)
@@ -384,7 +401,8 @@ class TestFixedKAN(unittest.TestCase):
             "metrics": {
                 "train_accuracy": float(train_accuracy),
                 "test_accuracy": float(test_accuracy),
-                "training_time_seconds": training_time,
+                "structure_time_seconds": structure_time,
+                #"weight_time_seconds": weight_time,
                 "total_time_seconds": total_time
             }
         }
@@ -397,11 +415,12 @@ class TestFixedKAN(unittest.TestCase):
         print("\nExperiment Results:")
         print(f"Training Size: {experiment_config['train_size']}")
         print(f"Network Shape: {experiment_config['network_shape']}")
-        print(f"Training Time: {training_time:.2f} seconds ({training_time/60:.2f} minutes)")
-        print(f"Total Time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
+        print(f"Structure Optimization Time: {structure_time:.2f} seconds")
+        #print(f"Weight Training Time: {weight_time:.2f} seconds")
+        print(f"Total Time: {total_time:.2f} seconds")
         print(f"Train Accuracy: {train_accuracy:.4f}")
         print(f"Test Accuracy: {test_accuracy:.4f}")
-
+        kan.verify_coefficients()
         # Save model
         torch.save({
             'model_state_dict': kan.state_dict(),
