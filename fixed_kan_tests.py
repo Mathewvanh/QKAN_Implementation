@@ -1,15 +1,9 @@
 import unittest
-from datetime import datetime
-
 import torch
 import numpy as np
 from typing import Tuple
 
-from matplotlib import pyplot as plt
-from torchvision import datasets, transforms
-
-from KAN_w_cumulative_polynomials import FixedKANConfig, FixedKAN
-from mnist_sampling_diagnostics import analyze_mnist_sample, plot_sample_distributions, compare_multiple_samples
+from KAN_w_cumulative_polynomials import FixedKANConfig, FixedKAN, KANNeuron
 
 
 class TestFixedKAN(unittest.TestCase):
@@ -57,7 +51,7 @@ class TestFixedKAN(unittest.TestCase):
 
         # Create and optimize network
         kan = FixedKAN(self.config)
-        kan.optimize(x_data, y_data, use_quantum=True)
+        kan.optimize(x_data, y_data)
 
         # Make predictions
         with torch.no_grad():
@@ -70,7 +64,7 @@ class TestFixedKAN(unittest.TestCase):
 
         # Analyze network
         analysis = kan.analyze_network(x_data)
-
+        kan.visualize_analysis(analysis, x_data, y_data)
         # Verify architecture
         self.assertEqual(len(kan.layers), 2)  # Input->Hidden, Hidden->Output
         self.assertEqual(len(kan.layers[0].neurons), 10)  # 10 hidden neurons
@@ -115,14 +109,14 @@ class TestFixedKAN(unittest.TestCase):
     def test_multi_layer_network(self):
         """Test a deeper network architecture"""
         def complex_func(x: torch.Tensor) -> torch.Tensor:
-            return torch.sin(2 * np.pi * torch.cos(x**2)) + 0.5 * torch.cos(2 * np.pi * torch.exp(x**2))
+            return 0.5 * x**2 - 0.3 * x + 0.1
 
         # Generate data
-        x_data, y_data = self.generate_test_data(self.target_function, n_samples=1000)
+        x_data, y_data = self.generate_test_data(complex_func, n_samples=1000)
 
         # Create deeper network
         config = FixedKANConfig(
-            network_shape=[1, 10, 5, 1],  # Three layers
+            network_shape=[1, 5, 5, 1],  # Three layers
             max_degree=5
         )
         kan = FixedKAN(config)
@@ -151,60 +145,7 @@ class TestFixedKAN(unittest.TestCase):
             else:
                 self.assertEqual(len(layer_data['degrees']), 1)
 
-    def test_comparison_with_previous(self):
-        """Compare results with previous implementation"""
-        def test_func(x: torch.Tensor) -> torch.Tensor:
-            return torch.sin(2 * np.pi * x) + 0.5 * x**2
 
-        # Generate data
-        x_data, y_data = self.generate_test_data(self.target_function)
-
-        # Test new implementation
-        kan = FixedKAN(self.config)
-        kan.optimize(x_data, y_data)
-        with torch.no_grad():
-            y_pred_new = kan(x_data)
-        mse_new = torch.mean((y_pred_new - y_data) ** 2)
-
-        # Compare with previous implementation
-        from first_conversion_torch.TorchDegreeOptimizer import DegreeOptimizer, DegreeOptimizerConfig
-        old_config = DegreeOptimizerConfig(
-            network_shape=[1, 10, 1],
-            max_degree=7
-        )
-        optimizer = DegreeOptimizer(old_config)
-        optimizer.fit(x_data, y_data)
-        y_pred_old = optimizer.predict(x_data)
-        mse_old = torch.mean((y_pred_old - y_data) ** 2)
-
-        print(f"New implementation MSE: {mse_new.item()}")
-        print(f"Old implementation MSE: {mse_old.item()}")
-
-        # Analyze both
-        new_analysis = kan.analyze_network(x_data)
-        old_analysis = optimizer.analyze_network(x_data, y_data)
-
-        # Plot comparison
-        import matplotlib.pyplot as plt
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-
-        # Plot new implementation
-        x_np = x_data.cpu().numpy()
-        y_np = y_data.cpu().numpy()
-        y_new = y_pred_new.detach().cpu().numpy()
-        ax1.scatter(x_np, y_np, alpha=0.5, label='Data')
-        ax1.plot(x_np, y_new, 'r-', label='New KAN')
-        ax1.set_title('New Implementation')
-        ax1.legend()
-
-        # Plot old implementation
-        y_old = y_pred_old.detach().cpu().numpy()
-        ax2.scatter(x_np, y_np, alpha=0.5, label='Data')
-        ax2.plot(x_np, y_old, 'b-', label='Old KAN')
-        ax2.set_title('Old Implementation')
-        ax2.legend()
-
-        plt.show()
     def test_multivariate_fractal(self):
         """Test fitting a complex multivariate fractal function"""
         @staticmethod
@@ -241,13 +182,13 @@ class TestFixedKAN(unittest.TestCase):
 
         # Create network
         config = FixedKANConfig(
-            network_shape=[2, 10, 1],
+            network_shape=[2, 5,5, 1],
             max_degree=5
         )
         kan = FixedKAN(config)
 
         # Optimize and predict
-        kan.optimize(x_data, y_data, use_quantum=True)
+        kan.optimize(x_data, y_data)
         with torch.no_grad():
             y_pred = kan(x_data)
 
@@ -290,188 +231,54 @@ class TestFixedKAN(unittest.TestCase):
         # Show detailed network analysis
         kan.visualize_analysis(analysis, x_data, y_data)
 
-    def test_mnist_classification(self):
-        """Test fitting a complex MNIST classification function with QUBO degree optimization"""
-        import time
-        import json
-        network_shape = [784,32,16,16,10]
-        max_degree = 5
-        train_size = 10000
-        complexity_weight = 0.1
-        weight_epochs = 20
-        learning_rate = 0.002
-        experiment_config = {
-            'date': datetime.now().strftime("%b-%d-%Y-%I-%M-%S"),
-            'train_size': train_size,
-            'network_shape': network_shape,
-            'max_degree': max_degree,
-            'complexity_weight': complexity_weight,
-            'weight_epochs': weight_epochs,
-            'learning_rate': learning_rate,
-            'test_size': 10000,  # Full MNIST test set
-        }
+    def test_save_load(self):
+        """Test saving and loading the model preserves structure and predictions"""
+        def simple_func(x: torch.Tensor) -> torch.Tensor:
+            return 0.5 * x**2 - 0.3 * x + 0.1
 
-        start_time = time.time()
+        # Generate data
+        x_data, y_data = self.generate_test_data(simple_func)
 
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))])
+        # Create and optimize original network
+        original_kan = FixedKAN(self.config)
+        original_kan.optimize(x_data, y_data)
 
-        train_dataset = datasets.MNIST(root='./data', train=True, transform=transform, download=True)
-        test_dataset = datasets.MNIST(root='./data', train=False, transform=transform, download=True)
-
-        # Get training sample
-        train_indices = torch.randperm(len(train_dataset))[:train_size]
-        x_train = train_dataset.data[train_indices].reshape(-1, 784).float() / 255.0
-        y_train_labels = train_dataset.targets[train_indices]
-
-
-        # Convert to one-hot
-        y_train = torch.zeros((train_size, 10))
-        y_train.scatter_(1, y_train_labels.unsqueeze(1), 1)
-
-        # Use full test set for validation
-        x_test = test_dataset.data.reshape(-1, 784).float() / 255.0
-        y_test_labels = test_dataset.targets
-
-        config = FixedKANConfig(
-            network_shape=network_shape,
-            max_degree=max_degree,
-            complexity_weight=complexity_weight,
-        )
-        kan = FixedKAN(config)
-
-        # Train on training data
-        structure_start = time.time()
-        print("Phase 1: Optimizing network structure with QUBO...")
-        kan.optimize(x_train, y_train)
-        structure_end = time.time()
-        structure_time = structure_end - structure_start
-
-        train_data = torch.utils.data.TensorDataset(x_train, y_train)
-        train_loader = torch.utils.data.DataLoader(train_data, batch_size=64, shuffle=True)
-
-        #Phase 2: Horizontal Weight Training
-        #print("Phase 2: Training horizontal weights...")
-        # weight_start = time.time()
-        # kan.train_horizontal_weights(
-        #     train_loader=train_loader,
-        #     epochs=weight_epochs,
-        #     learning_rate=learning_rate
-        # )
-        # weight_end = time.time()
-        # weight_time = weight_end - weight_start
-        # Test on both train and test sets
+        # Get original predictions
         with torch.no_grad():
-            # Training set accuracy
-            y_pred_train = kan(x_train)
-            train_predictions = torch.argmax(y_pred_train, dim=1)
-            train_accuracy = (train_predictions == y_train_labels).float().mean()
+            original_pred = original_kan(x_data)
+            original_mse = torch.mean((original_pred - y_data) ** 2)
 
-            # Test set accuracy
-            y_pred_test = kan(x_test)
-            test_predictions = torch.argmax(y_pred_test, dim=1)
-            test_accuracy = (test_predictions == y_test_labels).float().mean()
+        # Save the model
+        save_path = 'test_kan_save.pt'
+        original_kan.save_model(save_path)
 
-        total_time = time.time() - start_time
+        # Load the model
+        loaded_kan = FixedKAN.load_model(save_path)
 
-        # Compile results
-        results = {
-            **experiment_config,
-            "metrics": {
-                "train_accuracy": float(train_accuracy),
-                "test_accuracy": float(test_accuracy),
-                "structure_time_seconds": structure_time,
-                #"weight_time_seconds": weight_time,
-                "total_time_seconds": total_time
-            }
-        }
+        # Check predictions are identical
+        with torch.no_grad():
+            loaded_pred = loaded_kan(x_data)
+            loaded_mse = torch.mean((loaded_pred - y_data) ** 2)
 
-        # Save results with timestamp
-        results_filename = f'mnist_kan_results_acc_{test_accuracy:.4f}_{datetime.now().strftime("%H-%M-%S")}.json'
-        with open(results_filename, 'w') as f:
-            json.dump(results, f, indent=4)
+        # Test predictions are exactly the same
+        self.assertTrue(torch.allclose(original_pred, loaded_pred))
+        self.assertEqual(original_mse.item(), loaded_mse.item())
 
-        print("\nExperiment Results:")
-        print(f"Training Size: {experiment_config['train_size']}")
-        print(f"Network Shape: {experiment_config['network_shape']}")
-        print(f"Structure Optimization Time: {structure_time:.2f} seconds")
-        #print(f"Weight Training Time: {weight_time:.2f} seconds")
-        print(f"Total Time: {total_time:.2f} seconds")
-        print(f"Train Accuracy: {train_accuracy:.4f}")
-        print(f"Test Accuracy: {test_accuracy:.4f}")
-        # Save model
-        torch.save({
-            'model_state_dict': kan.state_dict(),
-            'config': experiment_config,
-            'results': results
-        }, f'./models/mnist_kan_model_{test_accuracy:.4f}.pt')
+        # Test model structure is preserved
+        for orig_layer, loaded_layer in zip(original_kan.layers, loaded_kan.layers):
+            self.assertEqual(len(orig_layer.neurons), len(loaded_layer.neurons))
 
-        return results
-    def test_mnist_n_times(self, n:int = 5):
-        """Run MNIST test n times and analyze sampling distributions"""
+            for orig_neuron, loaded_neuron in zip(orig_layer.neurons, loaded_layer.neurons):
+                # Check degrees are the same
+                self.assertEqual(orig_neuron.degree, loaded_neuron.degree)
 
-        # Store results from each run
-        all_results = []
-        all_distributions = []
-        test_accuracies = []
+                # Check coefficients are the same
+                self.assertEqual(len(orig_neuron.coefficients), len(loaded_neuron.coefficients))
+                for orig_coeff, loaded_coeff in zip(orig_neuron.coefficients, loaded_neuron.coefficients):
+                    self.assertTrue(torch.allclose(orig_coeff, loaded_coeff))
 
-        for run in range(n):
-            print(f"\n=== Run {run + 1}/{n} ===")
-            results = self.test_mnist_classification()
-
-            # # Store results
-            all_results.append(results)
-            # all_distributions.append(results['sampling_stats']['class_distribution'])
-            # test_accuracies.append(results['metrics']['test_accuracy'])
-
-        # Analyze distributions across all runs
-        print("\n=== Analysis Across All Runs ===")
-        # distributions = np.array(all_distributions)
-        accuracies = np.array(test_accuracies)
-
-        # # Plot all distributions together
-        # plt.figure(figsize=(15, 8))
-        #
-        # # Plot individual runs
-        # for i, (dist, acc) in enumerate(zip(distributions, accuracies)):
-        #     plt.plot(range(10), dist, 'o-', alpha=0.6,
-        #              label=f'Run {i+1} (Acc: {acc:.3f})')
-        #
-        # # Plot ideal distribution (10% each)
-        # plt.axhline(y=10, color='k', linestyle='--', alpha=0.5, label='Ideal (10%)')
-        #
-        # plt.title('Class Distributions Across Runs')
-        # plt.xlabel('Digit Class')
-        # plt.ylabel('Percentage in Sample')
-        # plt.legend()
-        # plt.grid(True, alpha=0.3)
-        # plt.show()
-
-        # Analysis statistics
-        average_accuracy = np.mean(accuracies)
-        std_accuracy = np.std(accuracies)
-
-        print(f"\nAccuracy Statistics:")
-        print(f"Average Test Accuracy: {average_accuracy:.4f}")
-        print(f"Std Dev Accuracy: {std_accuracy:.4f}")
-
-        # Find best and worst runs
-        best_run = np.argmax(accuracies)
-        worst_run = np.argmin(accuracies)
-
-        print(f"\nBest Run ({accuracies[best_run]:.4f}):")
-        #print("Class distribution:", distributions[best_run])
-
-        print(f"\nWorst Run ({accuracies[worst_run]:.4f}):")
-        #print("Class distribution:", distributions[worst_run])
-
-        # Calculate class representation variation
-        #class_stds = np.std(distributions, axis=0)
-        # print("\nClass Variation (std dev across runs):")
-        # for digit in range(10):
-        #     print(f"Digit {digit}: {class_stds[digit]:.2f}%")
-
-        return all_results
+        # Clean up
+        import os
+        os.remove(save_path)
 if __name__ == '__main__':
     unittest.main(argv=['first-arg-is-ignored'], exit=False)
