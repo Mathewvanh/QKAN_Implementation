@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets
 from torchvision.transforms import transforms
 
-from CP_KAN import FixedKANConfig, FixedKAN
+from KAN_w_cumulative_polynomials import FixedKANConfig, FixedKAN
 
 
 class TestQKANonCIFAR10(unittest.TestCase):
@@ -28,7 +28,7 @@ class TestQKANonCIFAR10(unittest.TestCase):
         # ---------------------------
         self.qkan_config = FixedKANConfig(
             network_shape=[3072, 32, 32, 10],
-            max_degree=5,
+            max_degree=7,
             complexity_weight=0.0,
             trainable_coefficients=False,
             skip_qubo_for_hidden=False
@@ -93,7 +93,7 @@ class TestQKANonCIFAR10(unittest.TestCase):
 
         # 2) MSE training
         num_epochs = 500
-        lr = 1e-3
+        lr = 1e-4
         train_losses = []
         optimizer = None  # We'll replicate the train loop manually to record losses
 
@@ -194,8 +194,8 @@ class TestQKANonCIFAR10(unittest.TestCase):
         qkan.optimize(self.x_train, self.y_train_onehot)
 
         # Now cross-entropy training on integer labels
-        num_epochs = 1000
-        lr = 1e-3
+        num_epochs = 500
+        lr = 1e-4
         train_losses = []
         from torch.optim import Adam
         optimizer = Adam(self._gather_trainable_params(qkan), lr=lr)

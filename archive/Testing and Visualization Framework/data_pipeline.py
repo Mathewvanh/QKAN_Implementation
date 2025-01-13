@@ -4,7 +4,7 @@ from typing import Tuple, Dict
 
 from polars import DataFrame
 from sklearn.preprocessing import RobustScaler, MinMaxScaler
-from data_pipeline_js_config import DataConfig
+from config import DataConfig
 import logging
 class DataPipeline:
     def __init__(self, config: DataConfig, logger: logging.Logger):
@@ -74,8 +74,7 @@ class DataPipeline:
 
         train_mask = df.get_column('date_id').is_in(train_dates).to_numpy()
         val_mask = df.get_column('date_id').is_in(val_dates).to_numpy()
-        print(f'training: min: {train_dates.min()},max: {train_dates.max()}')
-        print(f'val days: min: {val_dates.min()}, max: {val_dates.max()}')
+
         train_data = df.filter(train_mask).select([pl.col(f'{col}_normalized') for col in self.config.feature_cols])
         val_data = df.filter(val_mask).select([pl.col(f'{col}_normalized') for col in self.config.feature_cols])
 
