@@ -4,7 +4,7 @@ import unittest
 import torch
 from torch import nn
 
-from KAN_w_cumulative_polynomials import FixedKAN
+from CP_KAN import FixedKAN
 from Test_js import weighted_r2
 
 

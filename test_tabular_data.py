@@ -21,7 +21,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 import xgboost as xgb
 
 # KAN code
-from KAN_w_cumulative_polynomials import FixedKANConfig, FixedKAN
+from CP_KAN import FixedKANConfig, FixedKAN
 
 #############################################################################
 # 1) Helper: parameter counts & shape approximations
@@ -401,7 +401,7 @@ def experiment_house_sales_regression(batch_size=4096, num_epochs=100):
     X, y = load_house_sales_data(normalize=True, log_target=True)
 
     X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
-
+    print(X_train.shape)
     # Convert to torch
     X_train_t = torch.tensor(X_train, dtype=torch.float32)
     y_train_t = torch.tensor(y_train, dtype=torch.float32).unsqueeze(-1)
@@ -454,13 +454,13 @@ def experiment_house_sales_regression(batch_size=4096, num_epochs=100):
         input_dim=X_train.shape[1],
         target_dim=1,
         desired_params=desired_params,
-        max_degree=3
+        max_degree=7
     )
     config = FixedKANConfig(
         network_shape=kan_shape,
         max_degree=7,
         complexity_weight=0.0,
-        trainable_coefficients=False,
+        trainable_coefficients=True,
         skip_qubo_for_hidden=False,
         default_hidden_degree=5
     )
@@ -473,7 +473,7 @@ def experiment_house_sales_regression(batch_size=4096, num_epochs=100):
 
     qkan_optimizer = torch.optim.Adam(
         [p for p in qkan.parameters() if p.requires_grad],
-        lr=1e-3
+        lr=1e-4
     )
 
     qkan_train_mse = []
@@ -545,16 +545,16 @@ def experiment_house_sales_regression(batch_size=4096, num_epochs=100):
 def main():
     print("===== BEGIN TABULAR BENCHMARK EXPERIMENTS (Mini-Batch) =====")
 
-    # 1) Classification test on covertype
+    # #1) Classification test on covertype
     # experiment_covertype_classification(
     #     batch_size=4096,  # adjust if OOM
     #     num_epochs=500
     # )
 
-    # 2) Regression test on house_sales
+    #2) Regression test on house_sales
     experiment_house_sales_regression(
         batch_size=4096,  # adjust if OOM
-        num_epochs=200
+        num_epochs=500
     )
 
     print("===== END =====")

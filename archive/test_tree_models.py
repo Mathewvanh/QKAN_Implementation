@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import os
 from datetime import datetime
 
-from config import DataConfig
+from data_pipeline_js_config import DataConfig
 from data_pipeline import DataPipeline
 
 def weighted_r2(y_true: np.ndarray, y_pred: np.ndarray, w: np.ndarray) -> float:
@@ -185,7 +185,7 @@ def train_and_evaluate_trees():
 def create_combined_plot():
     """Create plot combining KAN, MLP, and tree model results."""
     # Load results
-    kan_mlp_path = './results/kan_vs_mlp_metrics.csv'
+    kan_mlp_path = '../results/kan_vs_mlp_metrics.csv'
     tree_path = './results/tree_models_metrics.csv'
     
     if not os.path.exists(kan_mlp_path) or not os.path.exists(tree_path):
@@ -241,8 +241,8 @@ def create_combined_plot():
 
 if __name__ == "__main__":
     # Ensure directories exist
-    os.makedirs("./models_janestreet", exist_ok=True)
-    os.makedirs("./results", exist_ok=True)
+    os.makedirs("../models_janestreet", exist_ok=True)
+    os.makedirs("../results", exist_ok=True)
     
     # Train tree models
     print("Training tree-based models...")

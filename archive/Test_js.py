@@ -13,11 +13,11 @@ import torch.nn as nn
 import lightgbm as lgb
 
 # 1) Data pipeline & config classes
-from config import DataConfig
+from data_pipeline_js_config import DataConfig
 from data_pipeline import DataPipeline
 
 # 2) KAN code
-from KAN_w_cumulative_polynomials import FixedKANConfig, FixedKAN
+from CP_KAN import FixedKANConfig, FixedKAN
 
 # --------------------------
 # Utility Metrics
@@ -170,7 +170,7 @@ class TestJaneStreetModels(unittest.TestCase):
         )
 
         # Ensure directory for saving
-        os.makedirs("./models_janestreet", exist_ok=True)
+        os.makedirs("../models_janestreet", exist_ok=True)
 
     def test_1_qkan_regression(self):
         """
@@ -365,30 +365,24 @@ class TestJaneStreetModels(unittest.TestCase):
             plt.show()
     def test_4_compare_kan_mlp_depths(self):
         """
-        Compare CP-KAN vs MLPs of depths 2,3,4,5 on Weighted MSE + Weighted R²,
-        using a fixed hidden_size=64 for MLP. This avoids the param search that
-        can blow up memory.
-        We'll produce a single figure with Weighted R² vs. epoch for train & val.
+        Compare CP-KAN vs MLPs of depths 2,3,4,5 on Weighted MSE + Weighted R².
+        We'll produce a single figure with R² vs. epochs (both train and val).
         """
 
-        import math
-        import torch
-        import numpy as np
-        import matplotlib.pyplot as plt
-
-        # ========== 1) CP-KAN Setup & Train ==========
+        # ------------------------
+        # 1) Prepare CP-KAN
+        # ------------------------
         print("\n==== [CP-KAN] Weighted MSE Regression ====")
         qkan = FixedKAN(self.qkan_config)
 
-        # 1.1) QUBO-based degree selection (unweighted)
+        # Do QUBO-based degree selection (unweighted least squares)
         qkan.optimize(self.x_train_torch, self.y_train_torch.unsqueeze(-1))
 
-        # 1.2) Weighted MSE training
+        # We'll train for 500 epochs, same as your existing code
         num_epochs = 500
         lr = 1e-3
-        batch_size = 512
 
-        # gather trainable params
+        # Gather all trainable params
         params_to_train = []
         for layer in qkan.layers:
             params_to_train.extend([layer.combine_W, layer.combine_b])
@@ -397,50 +391,41 @@ class TestJaneStreetModels(unittest.TestCase):
                 if (self.qkan_config.trainable_coefficients and
                         neuron.coefficients is not None):
                     params_to_train.extend(list(neuron.coefficients))
-
         cpk_param_count = sum(p.numel() for p in params_to_train)
         print(f"[CP-KAN] param_count={cpk_param_count}")
 
-        optimizer_kan = torch.optim.Adam(params_to_train, lr=lr)
+        optimizer = torch.optim.Adam(params_to_train, lr=lr)
 
-        # Track Weighted R²
+        # We'll track Weighted R² each epoch for train & val
         qkan_train_r2 = []
         qkan_val_r2   = []
 
         for epoch in range(num_epochs):
-            # Mini-batch Weighted MSE
-            qkan.train()
-            n_train = len(self.x_train_torch)
-            n_batches = math.ceil(n_train / batch_size)
+            optimizer.zero_grad()
+            y_pred = qkan(self.x_train_torch).squeeze(-1)
+            numerator = torch.sum(self.w_train_torch * (self.y_train_torch - y_pred)**2)
+            denominator = torch.sum(self.w_train_torch)
+            loss = numerator / (denominator + 1e-12)
+            loss.backward()
+            optimizer.step()
 
-            for i in range(n_batches):
-                start = i*batch_size
-                end   = (i+1)*batch_size
-                x_batch = self.x_train_torch[start:end]
-                y_batch = self.y_train_torch[start:end]
-                w_batch = self.w_train_torch[start:end]
-
-                optimizer_kan.zero_grad()
-                y_pred_batch = qkan(x_batch).squeeze(-1)
-                numerator = torch.sum(w_batch*(y_batch - y_pred_batch)**2)
-                denominator = torch.sum(w_batch)
-                loss = numerator/(denominator+1e-12)
-                loss.backward()
-                optimizer_kan.step()
-
-            # Evaluate Weighted R²
-            qkan.eval()
+            # Compute Weighted R² on train
             with torch.no_grad():
-                y_pred_train = qkan(self.x_train_torch).squeeze(-1).cpu().numpy()
-                r2_train = weighted_r2(self.y_train_np, y_pred_train, self.w_train_np)
+                y_pred_train_np = y_pred.detach().cpu().numpy()
+                y_true_train_np = self.y_train_torch.cpu().numpy()
+                w_train_np      = self.w_train_torch.cpu().numpy()
+                r2_train = weighted_r2(y_true_train_np, y_pred_train_np, w_train_np)
                 qkan_train_r2.append(r2_train)
 
+                # Weighted R² on validation
                 y_pred_val = qkan(self.x_val_torch).squeeze(-1).cpu().numpy()
-                r2_val = weighted_r2(self.y_val_np, y_pred_val, self.w_val_np)
+                y_true_val = self.y_val_torch.cpu().numpy()
+                w_val      = self.w_val_torch.cpu().numpy()
+                r2_val     = weighted_r2(y_true_val, y_pred_val, w_val)
                 qkan_val_r2.append(r2_val)
 
             if (epoch+1) % 50 == 0:
-                print(f"[CP-KAN] Epoch {epoch+1}/{num_epochs}, Train R²={r2_train:.4f}, Val R²={r2_val:.4f}")
+                print(f"[CP-KAN] Epoch {epoch+1}/{num_epochs}, Weighted MSE={loss.item():.6f}, Train R²={r2_train:.4f}, Val R²={r2_val:.4f}")
 
         # Final CP-KAN metrics on val
         final_r2_val = qkan_val_r2[-1]
@@ -465,7 +450,7 @@ class TestJaneStreetModels(unittest.TestCase):
         mlp_depths = [2, 3, 4, 5]
         mlp_models = {}
         mlp_param_counts = {}
-
+        batch_size = 16
         # Build each MLP
         for d in mlp_depths:
             mlp_d = build_simple_mlp(self.input_dim, 1, depth=d, hidden_size=64)

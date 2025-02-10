@@ -12,9 +12,9 @@ import torch.nn as nn
 import pandas as pd
 
 # Local imports
-from config import DataConfig
+from data_pipeline_js_config import DataConfig
 from data_pipeline import DataPipeline
-from KAN_w_cumulative_polynomials import FixedKANConfig, FixedKAN
+from CP_KAN import FixedKANConfig, FixedKAN
 
 def count_parameters(module: nn.Module) -> int:
     """Count trainable parameters in a PyTorch module."""
