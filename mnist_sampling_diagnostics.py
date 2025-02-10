@@ -63,7 +63,7 @@ def analyze_mnist_sample(x_train: torch.Tensor, y_train_labels: torch.Tensor,
 def compare_multiple_samples(dataset: datasets.MNIST, sample_size: int, num_runs: int = 5):
     """
     Compare multiple random samples to analyze consistency
-    Returns dict with results and variation statistics
+    Returns dict with results_js and variation statistics
     """
     results = []
 

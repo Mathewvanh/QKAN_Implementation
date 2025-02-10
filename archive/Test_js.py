@@ -313,7 +313,7 @@ class TestJaneStreetModels(unittest.TestCase):
         # We'll do a small valid set => you can pass or just do your own eval
         dval = lgb.Dataset(self.x_val_np, label=self.y_val_np.squeeze(-1), weight=self.w_val_np.squeeze(-1))
 
-        # We'll store results in evals_result for plotting
+        # We'll store results_js in evals_result for plotting
         evals_result = {}
         params = {
             'objective': 'regression_l2',

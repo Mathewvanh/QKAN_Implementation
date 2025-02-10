@@ -36,7 +36,7 @@ class ModelEvaluator:
         return metrics
     @staticmethod
     def create_evaluation_summary(results: List[ModelResult]) -> pd.DataFrame:
-        """Create summary DataFrame of evaluation results"""
+        """Create summary DataFrame of evaluation results_js"""
         summary = []
         for result in results:
             row = {

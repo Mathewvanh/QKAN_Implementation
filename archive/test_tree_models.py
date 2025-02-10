@@ -88,7 +88,7 @@ def train_and_evaluate_trees():
                     'param_count': env.model.num_parameters()
                 }
                 # Save after each update
-                results_df.to_csv('./results/tree_models_metrics.csv', index=False)
+                results_df.to_csv('./results_js/tree_models_metrics.csv', index=False)
             
             result['train_r2'] = train_r2
             result['val_r2'] = val_r2
@@ -154,7 +154,7 @@ def train_and_evaluate_trees():
                     'param_count': env.model.num_features()
                 }
                 # Save after each update
-                results_df.to_csv('./results/tree_models_metrics.csv', index=False)
+                results_df.to_csv('./results_js/tree_models_metrics.csv', index=False)
         return _callback
     
     xgb_model = xgb.train(
@@ -183,19 +183,19 @@ def train_and_evaluate_trees():
     return results_df
 
 def create_combined_plot():
-    """Create plot combining KAN, MLP, and tree model results."""
-    # Load results
-    kan_mlp_path = '../results/kan_vs_mlp_metrics.csv'
-    tree_path = './results/tree_models_metrics.csv'
+    """Create plot combining KAN, MLP, and tree model results_js."""
+    # Load results_js
+    kan_mlp_path = '../results_js/kan_vs_mlp_metrics.csv'
+    tree_path = './results_js/tree_models_metrics.csv'
     
     if not os.path.exists(kan_mlp_path) or not os.path.exists(tree_path):
-        print("Missing results files. Run both KAN/MLP and tree model tests first.")
+        print("Missing results_js files. Run both KAN/MLP and tree model tests first.")
         return
     
     kan_mlp_results = pd.read_csv(kan_mlp_path)
     tree_results = pd.read_csv(tree_path)
     
-    # Combine results
+    # Combine results_js
     all_results = pd.concat([kan_mlp_results, tree_results], ignore_index=True)
     
     # Create plot
@@ -236,13 +236,13 @@ def create_combined_plot():
     plt.tight_layout()
     
     # Save plot
-    plt.savefig('./results/all_models_comparison.png', bbox_inches='tight')
-    print("Combined comparison plot saved to: ./results/all_models_comparison.png")
+    plt.savefig('./results_js/all_models_comparison.png', bbox_inches='tight')
+    print("Combined comparison plot saved to: ./results_js/all_models_comparison.png")
 
 if __name__ == "__main__":
     # Ensure directories exist
     os.makedirs("../models_janestreet", exist_ok=True)
-    os.makedirs("../results", exist_ok=True)
+    os.makedirs("../results_js", exist_ok=True)
     
     # Train tree models
     print("Training tree-based models...")

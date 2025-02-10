@@ -77,7 +77,7 @@ class TestQKANonCIFAR10(unittest.TestCase):
         self.labels_test = labels_test.to(self.device)                                   # [N_test]
 
         # Make sure models directory exists
-        os.makedirs("./models", exist_ok=True)
+        os.makedirs("../models", exist_ok=True)
 
     def test_1_qkan_training_mse(self):
         """

@@ -77,10 +77,10 @@ class TestKANvsMLPDepths(unittest.TestCase):
         
         # Ensure directories exist
         os.makedirs("./models_janestreet", exist_ok=True)
-        os.makedirs("./results", exist_ok=True)
+        os.makedirs("results_js", exist_ok=True)
 
-        # Load existing results or create new DataFrame
-        results_path = './results/kan_vs_mlp_metrics.csv'
+        # Load existing results_js or create new DataFrame
+        results_path = 'results_js/kan_vs_mlp_metrics.csv'
         if os.path.exists(results_path):
             self.results_df = pd.read_csv(results_path)
         else:
@@ -95,7 +95,7 @@ class TestKANvsMLPDepths(unittest.TestCase):
 
     def _save_metrics(self, model_type: str, depth: int, epoch: int, 
                      train_r2: float, val_r2: float, param_count: int):
-        """Save metrics to results DataFrame."""
+        """Save metrics to results_js DataFrame."""
         new_row = pd.DataFrame({
             'model_type': [model_type],
             'depth': [depth],
@@ -107,7 +107,7 @@ class TestKANvsMLPDepths(unittest.TestCase):
         self.results_df = pd.concat([self.results_df, new_row], ignore_index=True)
         
         # Save after each update
-        self.results_df.to_csv('./results/kan_vs_mlp_metrics.csv', index=False)
+        self.results_df.to_csv('./results_js/kan_vs_mlp_metrics.csv', index=False)
 
     def test_1_kan_training(self):
         """Train KAN with simplified config."""
@@ -276,10 +276,10 @@ class TestKANvsMLPDepths(unittest.TestCase):
 
     def test_3_plot_results(self):
         """Create comparison plots from saved metrics."""
-        if not os.path.exists('./results/kan_vs_mlp_metrics.csv'):
-            self.skipTest("No results file found. Run KAN and MLP tests first.")
+        if not os.path.exists('results_js/kan_vs_mlp_metrics.csv'):
+            self.skipTest("No results_js file found. Run KAN and MLP tests first.")
         
-        results = pd.read_csv('./results/kan_vs_mlp_metrics.csv')
+        results = pd.read_csv('results_js/kan_vs_mlp_metrics.csv')
         
         # Skip plotting if no data
         if len(results) == 0:
@@ -313,8 +313,8 @@ class TestKANvsMLPDepths(unittest.TestCase):
         plt.tight_layout()
         
         # Save plot
-        plt.savefig('./results/kan_vs_mlp_comparison.png', bbox_inches='tight')
-        print("Comparison plot saved to: ./results/kan_vs_mlp_comparison.png")
+        plt.savefig('./results_js/kan_vs_mlp_comparison.png', bbox_inches='tight')
+        print("Comparison plot saved to: ./results_js/kan_vs_mlp_comparison.png")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

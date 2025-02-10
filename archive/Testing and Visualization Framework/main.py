@@ -110,7 +110,7 @@ def run_experiment(config_path: str):
 
             train_time = time.time() - start_time
 
-            # Record results
+            # Record results_js
             result = ModelResult(
                 model_name=f"{model_config.model_type}_trial_{trial}",
                 MSE_Score=np.average(scores),

@@ -12,7 +12,7 @@ def plot_degree_optimization(
     y_data: torch.Tensor,
     title: str = "Degree Optimization Results"
 ) -> None:
-    """Plot degree optimization results"""
+    """Plot degree optimization results_js"""
     plt.figure(figsize=(15, 5))
     
     # Plot 1: Input data and approximation
@@ -56,7 +56,7 @@ def plot_degree_optimization_improved(
         y_data: torch.Tensor,
         title: str = "Degree Optimization Results"
 ) -> None:
-    """Plot degree optimization results with predictions for each degree"""
+    """Plot degree optimization results_js with predictions for each degree"""
     plt.figure(figsize=(15, 10))
 
     # Plot 1: Data and predictions for each degree

@@ -26,5 +26,5 @@ models:
 
 random_seed: 42
 num_trials: 3
-save_path: "./results"
+save_path: "./results_js"
 log_path: "./logs"
