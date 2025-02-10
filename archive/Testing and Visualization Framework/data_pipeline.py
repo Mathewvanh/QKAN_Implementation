@@ -4,7 +4,7 @@ from typing import Tuple, Dict
 
 from polars import DataFrame
 from sklearn.preprocessing import RobustScaler, MinMaxScaler
-from config import DataConfig
+from data_pipeline_js_config import DataConfig
 import logging
 class DataPipeline:
     def __init__(self, config: DataConfig, logger: logging.Logger):

@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets
 from torchvision.transforms import transforms
 
-from KAN_w_cumulative_polynomials import FixedKANConfig, FixedKAN
+from CP_KAN import FixedKANConfig, FixedKAN
 
 
 class TestQKANonCIFAR10(unittest.TestCase):

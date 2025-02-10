@@ -3,17 +3,17 @@ import unittest
 
 import numpy as np
 
-<<<<<<<< HEAD:archive/QKAN_Steps/QKANLayer.py
-from archive.QKAN_Steps.ChebyshevStep import ChebyshevStep
-from archive.QKAN_Steps.LCUStep import LCUStep
-from archive.QKAN_Steps.MulStep import MulStep
-from archive.QKAN_Steps.SUMStep import SUMStep
-========
+<<<<<<<< HEAD:QKAN_Steps_original/QKANLayer.py
 from QKAN_Steps_original.ChebyshevStep import ChebyshevStep
 from QKAN_Steps_original.LCUStep import LCUStep
 from QKAN_Steps_original.MulStep import MulStep
 from QKAN_Steps_original.SUMStep import SUMStep
->>>>>>>> ef0a483 (A bunch of reorganizing so it looks cleaner. The 2 files in the main folder is the current implementation.):QKAN_Steps_original/QKANLayer.py
+========
+from archive.QKAN_Steps.ChebyshevStep import ChebyshevStep
+from archive.QKAN_Steps.LCUStep import LCUStep
+from archive.QKAN_Steps.MulStep import MulStep
+from archive.QKAN_Steps.SUMStep import SUMStep
+>>>>>>>> cd4289a (Reorganized to put most of the old iteration files into archive.):archive/QKAN_Steps/QKANLayer.py
 
 
 class QKANLayer:
