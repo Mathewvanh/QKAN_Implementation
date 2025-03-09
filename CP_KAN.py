@@ -390,3 +390,348 @@ class FixedKAN(nn.Module):
 
             print(f"[CE Training] Epoch {epoch+1}/{num_epochs}, Loss={loss.item():.6f}, CE={ce_loss.item():.6f}")
         print("[train_model_cross_entropy] Done training!")
+
+    def optimize_integer_programming(self, x_data: torch.Tensor, y_data: torch.Tensor):
+        """
+        Use OR-Tools (Mixed Integer Linear Programming) to optimize the degree selection.
+        This is an alternative to the QUBO approach.
+        
+        Requires: pip install ortools
+        """
+        print("Starting Integer Programming optimization...")
+        try:
+            from ortools.linear_solver import pywraplp
+        except ImportError:
+            raise ImportError("OR-Tools is required for integer programming. Please install: pip install ortools")
+        
+        # Handle edge case of empty data
+        if x_data.shape[0] == 0 or y_data.shape[0] == 0:
+            raise ValueError("Cannot optimize with empty data")
+            
+        current = x_data
+        
+        for i, layer in enumerate(self.layers):
+            is_last = (i == len(self.layers) - 1)
+            print(f"Optimizing layer {i+1}/{len(self.layers)}...")
+            
+            if is_last:
+                # Final layer => target = y_data
+                target = y_data
+            else:
+                if self.config.skip_qubo_for_hidden:
+                    # Just set each neuron to default_hidden_degree
+                    for neuron in layer.neurons:
+                        neuron.selected_degree[0] = self.config.default_hidden_degree
+                        d_plus_1 = neuron.degree + 1
+                        neuron.coefficients = nn.ParameterList([
+                            nn.Parameter(torch.zeros(()), requires_grad=self.config.trainable_coefficients)
+                            for _ in range(d_plus_1)
+                        ])
+                    
+                    # Forward pass for next layer
+                    with torch.no_grad():
+                        current = layer(current)
+                    continue
+                else:
+                    # For hidden layer => use dimension-aligned target
+                    target = autoencoder_dim_align(current, layer.output_dim)
+            
+            # Now optimize each neuron in the layer independently
+            for j, neuron in enumerate(layer.neurons):
+                # Create the MIP solver with the SCIP backend.
+                solver = pywraplp.Solver.CreateSolver('SCIP')
+                if not solver:
+                    raise RuntimeError("Could not create the MIP solver")
+                
+                # Variables: x[d] = 1 if we select degree d
+                x = {}
+                for d in range(self.config.max_degree + 1):
+                    x[d] = solver.IntVar(0, 1, f'x_{d}')
+                
+                # Constraint: exactly one degree is selected
+                solver.Add(sum(x[d] for d in range(self.config.max_degree + 1)) == 1)
+                
+                # Compute MSE for each degree
+                mse_values = []
+                coeffs_dict = {}
+                
+                y_col = target[:, j].unsqueeze(-1)  # [batch_size,1]
+                for d_i in range(self.config.max_degree + 1):
+                    X = neuron._compute_cumulative_transform(current, d_i)  # [batch_size, d_i+1]
+                    coeffs = torch.linalg.lstsq(X, y_col).solution         # [d_i+1, 1]
+                    y_pred = X.matmul(coeffs)
+                    mse = torch.mean((y_col - y_pred)**2).item()  # scalar
+                    mse_values.append(mse)
+                    coeffs_dict[d_i] = coeffs
+                
+                # Objective: minimize MSE
+                objective = solver.Objective()
+                for d in range(self.config.max_degree + 1):
+                    objective.SetCoefficient(x[d], mse_values[d])
+                objective.SetMinimization()
+                
+                # Solve the problem
+                status = solver.Solve()
+                
+                if status == pywraplp.Solver.OPTIMAL:
+                    # Find which degree was selected
+                    selected_degree = -1
+                    for d in range(self.config.max_degree + 1):
+                        if x[d].solution_value() > 0.5:  # if x[d] == 1
+                            selected_degree = d
+                            break
+                    
+                    if selected_degree >= 0:
+                        # Set the degree and coefficients
+                        neuron.selected_degree[0] = selected_degree
+                        coeffs_list = coeffs_dict[selected_degree].squeeze(-1)
+                        neuron.set_coefficients(coeffs_list, self.config.trainable_coefficients)
+                    else:
+                        raise RuntimeError(f"No degree selected for neuron {j} in layer {i}")
+                else:
+                    raise RuntimeError(f"Failed to find optimal solution for neuron {j} in layer {i}")
+            
+            # Forward pass for next layer
+            with torch.no_grad():
+                current = layer(current)
+                
+        print("Integer Programming optimization completed")
+
+    def optimize_evolutionary(self, x_data: torch.Tensor, y_data: torch.Tensor, 
+                              population_size: int = 20, generations: int = 50):
+        """
+        Use a genetic algorithm to optimize the polynomial degrees.
+        This is an alternative to the QUBO approach.
+        """
+        print("Starting Evolutionary optimization...")
+        import random
+        
+        # Handle edge case of empty data
+        if x_data.shape[0] == 0 or y_data.shape[0] == 0:
+            raise ValueError("Cannot optimize with empty data")
+        
+        current = x_data
+        
+        for i, layer in enumerate(self.layers):
+            is_last = (i == len(self.layers) - 1)
+            print(f"Optimizing layer {i+1}/{len(self.layers)}...")
+            
+            if is_last:
+                # Final layer => target = y_data
+                target = y_data
+            else:
+                if self.config.skip_qubo_for_hidden:
+                    # Just set each neuron to default_hidden_degree
+                    for neuron in layer.neurons:
+                        neuron.selected_degree[0] = self.config.default_hidden_degree
+                        d_plus_1 = neuron.degree + 1
+                        neuron.coefficients = nn.ParameterList([
+                            nn.Parameter(torch.zeros(()), requires_grad=self.config.trainable_coefficients)
+                            for _ in range(d_plus_1)
+                        ])
+                    
+                    # Forward pass for next layer
+                    with torch.no_grad():
+                        current = layer(current)
+                    continue
+                else:
+                    # For hidden layer => use dimension-aligned target
+                    target = autoencoder_dim_align(current, layer.output_dim)
+            
+            # Number of neurons in this layer
+            num_neurons = layer.output_dim
+            print(f"  Layer has {num_neurons} neurons to optimize")
+            
+            # For very small networks, make sure population size is appropriate
+            actual_population_size = max(5, min(population_size, 2 ** num_neurons))
+            if actual_population_size != population_size:
+                print(f"  Adjusted population size to {actual_population_size} for small network")
+            
+            # Initialize population: each individual is a list of degrees for all neurons
+            population = []
+            for _ in range(actual_population_size):
+                individual = [random.randint(0, self.config.max_degree) for _ in range(num_neurons)]
+                population.append(individual)
+            
+            # Pre-compute MSE for each neuron and each degree
+            mse_cache = {}
+            coeffs_cache = {}
+            
+            for j, neuron in enumerate(layer.neurons):
+                mse_cache[j] = {}
+                coeffs_cache[j] = {}
+                y_col = target[:, j].unsqueeze(-1)  # [batch_size,1]
+                
+                for d_i in range(self.config.max_degree + 1):
+                    X = neuron._compute_cumulative_transform(current, d_i)  # [batch_size, d_i+1]
+                    coeffs = torch.linalg.lstsq(X, y_col).solution         # [d_i+1, 1]
+                    y_pred = X.matmul(coeffs)
+                    mse = torch.mean((y_col - y_pred)**2).item()  # scalar
+                    mse_cache[j][d_i] = mse
+                    coeffs_cache[j][d_i] = coeffs
+            
+            # Fitness function: sum of MSEs across all neurons
+            def fitness(individual):
+                return sum(mse_cache[j][degree] for j, degree in enumerate(individual))
+            
+            # Evolution loop
+            for gen in range(generations):
+                # Evaluate all individuals
+                fitness_scores = [fitness(ind) for ind in population]
+                
+                # Select parents (tournament selection)
+                def tournament_select(k=3):
+                    # Adjust k for small populations
+                    actual_k = min(k, actual_population_size)
+                    indices = random.sample(range(actual_population_size), actual_k)
+                    best_idx = min(indices, key=lambda i: fitness_scores[i])
+                    return population[best_idx]
+                
+                # Create next generation
+                next_population = []
+                
+                # Elitism: keep the best individual
+                elite_idx = fitness_scores.index(min(fitness_scores))
+                next_population.append(population[elite_idx])
+                
+                # Create rest of population through crossover and mutation
+                while len(next_population) < actual_population_size:
+                    # Crossover (single point)
+                    parent1 = tournament_select()
+                    parent2 = tournament_select()
+                    
+                    # Fix for when num_neurons is too small for traditional crossover
+                    if num_neurons <= 2:
+                        # For very small networks, just do a probabilistic selection from parents
+                        child = []
+                        for j in range(num_neurons):
+                            # 50% chance to pick from either parent
+                            if random.random() < 0.5:
+                                child.append(parent1[j])
+                            else:
+                                child.append(parent2[j])
+                    else:
+                        # Normal crossover for larger networks
+                        crossover_point = random.randint(1, num_neurons - 1)
+                        child = parent1[:crossover_point] + parent2[crossover_point:]
+                    
+                    # Mutation (with low probability)
+                    for j in range(num_neurons):
+                        if random.random() < 0.1:  # 10% mutation rate
+                            child[j] = random.randint(0, self.config.max_degree)
+                    
+                    next_population.append(child)
+                
+                # Update population
+                population = next_population
+                
+                if gen % 10 == 0:
+                    best_fitness = min(fitness_scores)
+                    print(f"  Generation {gen}, Best fitness: {best_fitness:.6f}")
+            
+            # Get the best individual
+            best_idx = min(range(actual_population_size), key=lambda i: fitness(population[i]))
+            best_individual = population[best_idx]
+            
+            # Apply the best configuration
+            for j, neuron in enumerate(layer.neurons):
+                degree = best_individual[j]
+                neuron.selected_degree[0] = degree
+                coeffs_list = coeffs_cache[j][degree].squeeze(-1)
+                neuron.set_coefficients(coeffs_list, self.config.trainable_coefficients)
+            
+            # Forward pass for next layer
+            with torch.no_grad():
+                current = layer(current)
+                
+        print("Evolutionary optimization completed")
+
+    def optimize_greedy_heuristic(self, x_data: torch.Tensor, y_data: torch.Tensor):
+        """
+        Use a greedy heuristic to optimize the polynomial degrees.
+        This approach tries degrees in order of complexity and stops when 
+        improvements fall below a threshold.
+        """
+        print("Starting Greedy Heuristic optimization...")
+        
+        # Handle edge case of empty data
+        if x_data.shape[0] == 0 or y_data.shape[0] == 0:
+            raise ValueError("Cannot optimize with empty data")
+            
+        current = x_data
+        
+        for i, layer in enumerate(self.layers):
+            is_last = (i == len(self.layers) - 1)
+            print(f"Optimizing layer {i+1}/{len(self.layers)}...")
+            
+            if is_last:
+                # Final layer => target = y_data
+                target = y_data
+            else:
+                if self.config.skip_qubo_for_hidden:
+                    # Just set each neuron to default_hidden_degree
+                    for neuron in layer.neurons:
+                        neuron.selected_degree[0] = self.config.default_hidden_degree
+                        d_plus_1 = neuron.degree + 1
+                        neuron.coefficients = nn.ParameterList([
+                            nn.Parameter(torch.zeros(()), requires_grad=self.config.trainable_coefficients)
+                            for _ in range(d_plus_1)
+                        ])
+                    
+                    # Forward pass for next layer
+                    with torch.no_grad():
+                        current = layer(current)
+                    continue
+                else:
+                    # For hidden layer => use dimension-aligned target
+                    target = autoencoder_dim_align(current, layer.output_dim)
+            
+            # Optimize each neuron separately
+            for j, neuron in enumerate(layer.neurons):
+                y_col = target[:, j].unsqueeze(-1)  # [batch_size,1]
+                
+                best_degree = 0
+                best_mse = float('inf')
+                best_coeffs = None
+                improvement_threshold = 0.01  # Stop if improvement is less than 1%
+                
+                # For each degree, compute MSE and check if it's better
+                for d_i in range(self.config.max_degree + 1):
+                    X = neuron._compute_cumulative_transform(current, d_i)  # [batch_size, d_i+1]
+                    coeffs = torch.linalg.lstsq(X, y_col).solution         # [d_i+1, 1]
+                    y_pred = X.matmul(coeffs)
+                    mse = torch.mean((y_col - y_pred)**2).item()  # scalar
+                    
+                    # Calculate relative improvement
+                    if d_i > 0:
+                        rel_improvement = (prev_mse - mse) / prev_mse
+                    else:
+                        rel_improvement = 1.0  # No previous MSE for first degree
+                    
+                    prev_mse = mse
+                    
+                    # Update best if this degree is better
+                    if mse < best_mse:
+                        best_mse = mse
+                        best_degree = d_i
+                        best_coeffs = coeffs
+                    
+                    # Stop if improvement is below threshold
+                    if d_i > 0 and rel_improvement < improvement_threshold:
+                        # Use the current degree if it's the best so far, otherwise use previous
+                        if mse < best_mse:
+                            best_mse = mse
+                            best_degree = d_i
+                            best_coeffs = coeffs
+                        break
+                
+                # Set the best degree and coefficients
+                neuron.selected_degree[0] = best_degree
+                coeffs_list = best_coeffs.squeeze(-1)
+                neuron.set_coefficients(coeffs_list, self.config.trainable_coefficients)
+            
+            # Forward pass for next layer
+            with torch.no_grad():
+                current = layer(current)
+                
+        print("Greedy Heuristic optimization completed")
