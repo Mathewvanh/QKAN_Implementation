@@ -1,0 +1,18 @@
+# Core ML/Data
+torch>=1.10 # Or your specific torch version
+numpy>=1.20
+pandas>=1.3
+scikit-learn>=1.0 # For PCA in CP_KAN.py (autoencoder_dim_align) and StandardScaler
+polars>=0.15 # For data_pipeline.py
+datasets>=2.0 # Added for Hugging Face datasets (INRIA House Sales)
+
+# KAN Optimization Dependencies
+pyqubo>=1.0 # For QUBO optimization
+dwave-neal>=0.5 # Sampler for QUBO (Simulated Annealing)
+# DWave Ocean SDK might be needed if using real QPUs: pip install dwave-ocean-sdk
+ortools>=9.0 # For Integer Programming optimization
+
+# Utilities
+PyYAML>=5.4 # For loading config.yaml
+matplotlib>=3.4 # For plotting results
+tqdm>=4.60 # For progress bars
