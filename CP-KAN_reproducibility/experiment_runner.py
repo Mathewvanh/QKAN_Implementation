@@ -23,9 +23,21 @@ from sklearn.preprocessing import StandardScaler
 import torchvision # For MNIST/CIFAR
 import torchvision.transforms as transforms
 from datasets import load_dataset # Added for Hugging Face datasets
+# GBT Imports
+import xgboost as xgb
+import lightgbm as lgb
 
 # Local imports
 from CP_KAN import FixedKANConfig, FixedKAN
+# EasyTSF KAN Layer Imports (now from local copy)
+from kanlayer_easytsf import (
+    WaveKANLayer,
+    NaiveFourierKANLayer,
+    JacobiKANLayer,
+    ChebyKANLayer,
+    TaylorKANLayer,
+    RBFKANLayer
+)
 
 def count_parameters(module: nn.Module) -> int:
     """Count trainable parameters in a module."""
@@ -415,12 +427,21 @@ class ExperimentRunner:
     def _train_and_evaluate(self, model: nn.Module, optimizer: torch.optim.Optimizer,
                           opt_method: str, config: Dict[str, Any], num_epochs: int
                           ) -> Tuple[Dict[str, List], float]:
+        """Trains and evaluates a model, appending results to self.results_df."""
         model.to(self.device); metrics = defaultdict(list)
         criterion = nn.CrossEntropyLoss() if self.task_type == 'classification' else nn.MSELoss()
         if self.dataset_name.lower() == 'jane_street' and self.use_weights:
              criterion = lambda y_pred, y_true, w: torch.sum(w * (y_true.squeeze() - y_pred.squeeze())**2) / (torch.sum(w) + 1e-12)
         best_primary_metric_val = float('-inf') if self.higher_is_better else float('inf')
         
+        # Extract identifiers from the passed config
+        model_type = config.get('model_type', 'Unknown')
+        kan_opt_method = config.get('kan_opt_method') # Will be None for MLP
+        param_count = config.get('param_count', np.nan)
+        kan_opt_time = config.get('kan_opt_time', np.nan)
+        # Get the core hyperparameter config (without the identifiers we just extracted)
+        core_config = {k: v for k, v in config.items() if k not in ['model_type', 'kan_opt_method', 'param_count', 'kan_opt_time']}
+
         pbar = trange(num_epochs, desc=f"Training {opt_method}", leave=False)
         for epoch in pbar:
             model.train(); optimizer.zero_grad(); output = model(self.x_train)
@@ -429,200 +450,643 @@ class ExperimentRunner:
             
             model.eval(); epoch_metrics = {}
             with torch.no_grad():
-                train_output = model(self.x_train); epoch_metrics['train_loss'] = loss.item()
+                # --- Calculate Train Metrics --- #
+                train_output = model(self.x_train); 
+                epoch_metrics['train_loss'] = loss.item() # Use calculated train loss
+                # --- Calculate Validation Metrics --- #
                 val_output = model(self.x_val)
                 val_loss_args = [val_output, self.y_val, self.w_val] if self.dataset_name.lower() == 'jane_street' and self.use_weights else [val_output, self.y_val]
                 epoch_metrics['val_loss'] = criterion(*val_loss_args).item()
                 
+                # --- Task-Specific Metrics --- #
                 if self.task_type == 'regression':
-                    epoch_metrics['train_mse'] = epoch_metrics['train_loss']
+                    epoch_metrics['train_mse'] = epoch_metrics['train_loss'] # Approx
                     epoch_metrics['val_mse'] = epoch_metrics['val_loss']
                     epoch_metrics['train_r2'] = weighted_r2(self.y_train, train_output, self.w_train) if 'jane_street' in self.dataset_name.lower() and self.use_weights else r2_score(self.y_train, train_output)
                     epoch_metrics['val_r2'] = weighted_r2(self.y_val, val_output, self.w_val) if 'jane_street' in self.dataset_name.lower() and self.use_weights else r2_score(self.y_val, val_output)
-                else:
+                else: # Classification
                     epoch_metrics['train_accuracy'] = accuracy(self.y_train, train_output)
                     epoch_metrics['val_accuracy'] = accuracy(self.y_val, val_output)
                 
+                # --- Determine Primary Metric for Logging/Comparison --- #
                 current_primary_val_metric_key = f'val_{self.primary_metric}'
                 current_primary_metric = epoch_metrics.get(current_primary_val_metric_key)
                 if current_primary_metric is None:
-                     self.logger.error(f"Primary metric '{current_primary_val_metric_key}' not found in calculated metrics!")
+                     self.logger.error(f"Primary metric '{current_primary_val_metric_key}' not found in calculated metrics! Using val_loss.")
                      current_primary_metric = epoch_metrics['val_loss']; temp_higher_is_better = False
                 else: temp_higher_is_better = self.higher_is_better
 
-            pbar.set_postfix({f"val_{self.primary_metric}": f"{current_primary_metric:.4f}"})
+            pbar.set_postfix({f"val_{self.primary_metric}": f"{current_primary_metric:.4f}"}) # Update progress bar
+            # Check if current epoch metric is the best seen so far
             is_better = (current_primary_metric > best_primary_metric_val) if temp_higher_is_better else (current_primary_metric < best_primary_metric_val)
             if is_better: best_primary_metric_val = current_primary_metric
             
+            # Store metrics for this epoch (for potential internal use or history return)
             metrics['epoch'].append(epoch)
             for k, v in epoch_metrics.items(): metrics[k].append(v)
             
-            row_data = {'opt_method': [opt_method], 'config': [str(config)], 'opt_time': [config.get('opt_time', np.nan)],
-                        'epoch': [epoch], 'param_count': [config.get('param_count', np.nan)],
-                        **{k: [v] for k, v in epoch_metrics.items()}}
-            new_row = pd.DataFrame(row_data)
-            if self.results_df.empty: self.results_df = new_row
-            else: self.results_df = pd.concat([self.results_df.reindex(columns=self.results_df.columns.union(new_row.columns)),
-                                               new_row.reindex(columns=self.results_df.columns.union(new_row.columns))], ignore_index=True)
+            # --- Append results for this epoch to the main DataFrame --- #
+            row_data = {
+                 'model_type': model_type,                  # Added
+                 'kan_opt_method': kan_opt_method,        # Added (can be None)
+                 'config': str(core_config),             # Store core hyperparams
+                 'param_count': param_count,             # Added
+                 'kan_opt_time': kan_opt_time,          # Added (can be NaN)
+                 'epoch': epoch,
+                 **epoch_metrics                        # Add all calculated metrics for this epoch
+            }
+            new_row = pd.DataFrame([row_data]) # Needs to be list of dicts or dict of lists
+            
+            # Use pd.concat for robust appending, handles new columns
+            if self.results_df.empty:
+                 self.results_df = new_row
+            else:
+                 self.results_df = pd.concat([self.results_df, new_row], ignore_index=True)
 
+            # Optional: Log progress periodically
             if epoch % 20 == 0:
-                 log_msg = f"[{opt_method}] Cfg={config} Ep {epoch}/{num_epochs}, Loss(tr/v)={epoch_metrics['train_loss']:.4f}/{epoch_metrics['val_loss']:.4f}, Val {self.primary_metric.upper()}={current_primary_metric:.4f}"
+                 log_msg = f"[{opt_method}] Cfg={core_config} Ep {epoch}/{num_epochs}, Loss(tr/v)={epoch_metrics['train_loss']:.4f}/{epoch_metrics['val_loss']:.4f}, Val {self.primary_metric.upper()}={current_primary_metric:.4f}"
                  self.logger.info(log_msg)
+        # End of epoch loop
         pbar.close()
-        return metrics, best_primary_metric_val
+        return metrics, best_primary_metric_val # Return epoch metrics history and best val score
 
-    # --- Grid Search --- 
-    def run_grid_search(self, param_grid: Dict[str, List[Any]], num_epochs: int = 50, methods_to_run: Optional[List[str]] = None):
-        self.logger.info(f"\n=== Running Grid Search for {self.dataset_name} ({self.task_type}) ===")
-        all_opt = { 'QUBO': lambda k,x,y: k.optimize(x,y), 'IntegerProgramming': lambda k,x,y: k.optimize_integer_programming(x,y),
-                      'Evolutionary': lambda k,x,y: k.optimize_evolutionary(x,y), 'GreedyHeuristic': lambda k,x,y: k.optimize_greedy_heuristic(x,y) }
-        opt_methods_to_run = {k:v for k,v in all_opt.items() if k in methods_to_run} if methods_to_run else all_opt
-        if not opt_methods_to_run: raise ValueError("No valid optimization methods selected.")
-        self.logger.info(f"Running KAN optimization methods: {list(opt_methods_to_run.keys())}")
+    # --- Grid Search ---
+    def run_grid_search(self, num_epochs: Optional[int] = None):
+        """Runs grid search based on the structured config (parameter_grids)."""
         
-        best_configs_perf = { m: {'metric_val': float('-inf') if self.higher_is_better else float('inf'), 'config': None, 'time': 0} 
-                              for m in opt_methods_to_run }
-        best_models = {m: None for m in opt_methods_to_run}
+        # Get settings from the main config
+        methods_to_run = self.config.get('methods_to_run', ['FixedKAN']) # Default to KAN if not specified
+        num_epochs = num_epochs if num_epochs is not None else self.config.get('num_epochs', 50)
+        parameter_grids = self.config.get('parameter_grids')
 
-        grid_keys = list(param_grid.keys())
-        if not all(k in param_grid for k in grid_keys): raise ValueError("Grid missing required keys.")
-        total_configs = np.prod([len(v) for v in param_grid.values()]) * len(opt_methods_to_run)
-        self.logger.info(f"Grid keys: {grid_keys}, Total configs: {total_configs}")
-        main_pbar = tqdm(total=int(total_configs), desc="Overall Grid Search", position=0, ncols=100)
-        
+        if not parameter_grids:
+            raise ValueError("Configuration file must contain 'parameter_grids' section for grid search.")
+
+        self.logger.info(f"\n=== Starting Grid Search for {self.dataset_name} ({self.task_type}) ===")
+        self.logger.info(f"Methods to run: {methods_to_run}")
+        self.logger.info(f"Number of epochs per run: {num_epochs}")
+
+        # --- KAN Optimization Methods (if KAN is run) ---
+        kan_optimizers = { 
+            'QUBO': lambda k,x,y,cfg: k.optimize(x,y), # Placeholder
+            'IntegerProgramming': lambda k,x,y,cfg: k.optimize_integer_programming(x,y), # Placeholder
+            'Evolutionary': lambda k,x,y,cfg: k.optimize_evolutionary(x,y), # Placeholder
+            'GreedyHeuristic': lambda k,x,y,cfg: k.optimize_greedy_heuristic(x,y) # Placeholder
+        }
+        kan_methods_to_run = {}
+        if 'FixedKAN' in methods_to_run:
+            kan_opt_method_names = self.config.get('kan_optimize_methods', list(kan_optimizers.keys()))
+            kan_methods_to_run = {k:v for k,v in kan_optimizers.items() if k in kan_opt_method_names}
+            if not kan_methods_to_run: self.logger.warning("No KAN optimization methods selected/valid for FixedKAN run.")
+            else: self.logger.info(f"KAN optimization methods to attempt: {list(kan_methods_to_run.keys())}")
+
         import itertools
-        for param_combination in itertools.product(*param_grid.values()):
-            base_config = dict(zip(grid_keys, param_combination))
-            max_deg = base_config.get('max_degree', 5); hid_size = base_config.get('hidden_size', 64); lr = base_config.get('learning_rate', 1e-3)
 
-            for method_name, optimize_fn in opt_methods_to_run.items():
-                main_pbar.update(1)
-                main_pbar.set_description(f"{method_name} Cfg:{base_config}")
-                self.logger.info(f"\n--- Testing {method_name} --- Config: {base_config}")
+        # --- Iterate through Model Methods (e.g., FixedKAN, MLP) ---
+        for method_name in methods_to_run:
+            self.logger.info(f"\n--- Processing Model Type: {method_name} ---")
+            
+            specific_grid_config = parameter_grids.get(method_name)
+            if not specific_grid_config:
+                self.logger.warning(f"No parameter grid found for method '{method_name}' in 'parameter_grids'. Skipping.")
+                continue
                 
-                kan_config = FixedKANConfig(network_shape=[self.input_dim, hid_size, self.output_dim], max_degree=max_deg,
-                                          trainable_coefficients=True, skip_qubo_for_hidden=False, default_hidden_degree=4)
-                kan = FixedKAN(kan_config).to(self.device); p_count = count_parameters(kan)
-                self.logger.info(f"KAN params: {p_count}")
+            # Use the 'default' grid for now
+            param_grid = specific_grid_config.get('default')
+            if not param_grid:
+                self.logger.warning(f"No 'default' grid found within parameter_grids.{method_name}. Skipping.")
+                continue
+            
+            grid_keys = list(param_grid.keys())
+            param_values = list(param_grid.values())
+            total_combinations = np.prod([len(v) for v in param_values])
+            self.logger.info(f"Parameter grid keys for {method_name}: {grid_keys}")
+            self.logger.info(f"Total parameter combinations for {method_name}: {total_combinations}")
+
+            main_pbar = tqdm(itertools.product(*param_values), total=total_combinations, desc=f"Grid Search ({method_name})", position=0, ncols=100)
+            
+            # --- Iterate through Hyperparameter Combinations for this method ---
+            for param_combination_tuple in main_pbar:
+                current_params = dict(zip(grid_keys, param_combination_tuple))
+                main_pbar.set_postfix(current_params, refresh=False)
+                self.logger.debug(f"Testing {method_name} with params: {current_params}")
+
+                model: Optional[nn.Module] = None
+                model_config_obj = None 
+
+                # --- Initialize Correct Model Type ---
+                try: 
+                    if method_name == 'FixedKAN':
+                        hidden_size_cfg = current_params.get('hidden_size', 64) 
+                        if isinstance(hidden_size_cfg, int): hidden_layers = [hidden_size_cfg]
+                        elif isinstance(hidden_size_cfg, list): hidden_layers = hidden_size_cfg
+                        else: self.logger.error(f"Invalid hidden_size type '{type(hidden_size_cfg)}' for KAN."); continue
+                        max_deg = current_params.get('max_degree', 3)
+                        network_shape = [self.input_dim] + hidden_layers + [self.output_dim]
+                        kan_specific_params = { 'network_shape': network_shape, 'max_degree': max_deg, 
+                                              'trainable_coefficients': current_params.get('trainable_coefficients', True),
+                                              'skip_qubo_for_hidden': current_params.get('skip_qubo_for_hidden', False),
+                                              'default_hidden_degree': current_params.get('default_hidden_degree', 4) }
+                        model_config_obj = FixedKANConfig(**kan_specific_params)
+                        model = FixedKAN(model_config_obj).to(self.device)
+                        self.logger.debug(f"Initialized FixedKAN with shape: {network_shape}")
+
+                    elif method_name == 'MLP':
+                        hidden_layers = current_params.get('mlp_hidden_layers', [64, 64]) 
+                        activation = current_params.get('mlp_activation', 'ReLU') 
+                        mlp_full_layers = [self.input_dim] + hidden_layers + [self.output_dim]
+                        model_config_obj = {'layers': mlp_full_layers, 'activation': activation}
+                        model = self._create_mlp(mlp_full_layers, activation).to(self.device)
+                        self.logger.debug(f"Initialized MLP with layers: {mlp_full_layers}, activation: {activation}")
+                    
+                    # --- Add EasyTSF KAN Variants --- #
+                    elif method_name == 'WaveKAN':
+                        wavelet_type = current_params.get('wavelet_type', 'mexican_hat')
+                        model_config_obj = {'wavelet_type': wavelet_type} 
+                        model = WaveKANLayer(self.input_dim, self.output_dim, wavelet_type=wavelet_type, with_bn=False).to(self.device)
+                        self.logger.debug(f"Initialized WaveKANLayer with type: {wavelet_type}")
+                        
+                    elif method_name == 'FourierKAN':
+                        gridsize = current_params.get('fourier_gridsize', 10) # Example default
+                        model_config_obj = {'gridsize': gridsize}
+                        model = NaiveFourierKANLayer(self.input_dim, self.output_dim, gridsize=gridsize).to(self.device)
+                        self.logger.debug(f"Initialized NaiveFourierKANLayer with gridsize: {gridsize}")
+                        
+                    elif method_name == 'JacobiKAN':
+                        degree = current_params.get('jacobi_degree', 5) # Example default
+                        a = current_params.get('jacobi_a', 1.0)
+                        b = current_params.get('jacobi_b', 1.0)
+                        model_config_obj = {'degree': degree, 'a': a, 'b': b}
+                        model = JacobiKANLayer(self.input_dim, self.output_dim, degree=degree, a=a, b=b).to(self.device)
+                        self.logger.debug(f"Initialized JacobiKANLayer with degree: {degree}, a={a}, b={b}")
+
+                    elif method_name == 'ChebyKAN':
+                        degree = current_params.get('cheby_degree', 5) # Example default
+                        model_config_obj = {'degree': degree}
+                        model = ChebyKANLayer(self.input_dim, self.output_dim, degree=degree).to(self.device)
+                        self.logger.debug(f"Initialized ChebyKANLayer with degree: {degree}")
+                        
+                    elif method_name == 'TaylorKAN':
+                        order = current_params.get('taylor_order', 3) # Example default
+                        addbias = current_params.get('taylor_addbias', True)
+                        model_config_obj = {'order': order, 'addbias': addbias}
+                        model = TaylorKANLayer(self.input_dim, self.output_dim, order=order, addbias=addbias).to(self.device)
+                        self.logger.debug(f"Initialized TaylorKANLayer with order: {order}, addbias={addbias}")
+                        
+                    elif method_name == 'RBFKAN':
+                        num_centers = current_params.get('rbf_num_centers', int(np.sqrt(self.input_dim * self.output_dim)) or 10) # Example default heuristic
+                        alpha = current_params.get('rbf_alpha', 1.0)
+                        model_config_obj = {'num_centers': num_centers, 'alpha': alpha}
+                        model = RBFKANLayer(self.input_dim, self.output_dim, num_centers=num_centers, alpha=alpha).to(self.device)
+                        self.logger.debug(f"Initialized RBFKANLayer with num_centers: {num_centers}, alpha={alpha}")
+                        
+                    # --- End EasyTSF KAN Variants --- #
+                    
+                    elif method_name == 'XGBoost':
+                        self.logger.debug(f"Initializing XGBoost...")
+                        model_config_obj = current_params # Store params for GBT
+                        gbt_params = {k: v for k, v in current_params.items() if k not in ['learning_rate']} # Pop LR if using xgb specific one
+                        gbt_params['random_state'] = self.config.get('random_seed', 42)
+                        gbt_params['use_label_encoder'] = False # Suppress warning
+                        gbt_params['eval_metric'] = 'logloss' if self.task_type == 'classification' else 'rmse' # Set appropriate eval metric
+                        if self.task_type == 'classification':
+                            model = xgb.XGBClassifier(**gbt_params)
+                        else: # Regression
+                            model = xgb.XGBRegressor(**gbt_params)
+                        model_instance_for_eval = model # Use the same instance
+                        
+                    elif method_name == 'LightGBM':
+                        self.logger.debug(f"Initializing LightGBM...")
+                        model_config_obj = current_params # Store params for GBT
+                        gbt_params = {k: v for k, v in current_params.items() if k not in ['learning_rate']} # Pop LR if using lgbm specific one
+                        gbt_params['random_state'] = self.config.get('random_seed', 42)
+                        gbt_params['verbose'] = -1 # Suppress verbosity
+                        if self.task_type == 'classification':
+                            model = lgb.LGBMClassifier(**gbt_params)
+                        else: # Regression
+                            model = lgb.LGBMRegressor(**gbt_params)
+                        model_instance_for_eval = model # Use the same instance
+                        
+                    else:
+                        self.logger.warning(f"Unsupported model type '{method_name}' during initialization. Skipping.")
+                        continue
+                except Exception as e:
+                    self.logger.error(f"Error initializing {method_name} with params {current_params}: {e}", exc_info=True)
+                    continue 
                 
-                try:
-                    self.logger.info(f"Running {method_name} optimization..."); start_time = time.time()
-                    opt_data_x = self.x_optimize if self.task_type == 'classification' else self.x_train
-                    opt_data_y = self.y_optimize_onehot if self.task_type == 'classification' else self.y_train
-                    optimize_fn(kan, opt_data_x, opt_data_y)
-                    opt_time = time.time() - start_time; self.logger.info(f"Opt done: {opt_time:.2f}s")
+                # --- Proceed only if model initialized successfully --- #
+                if model is None and method_name not in ['XGBoost', 'LightGBM']: # GBT models are initialized directly above
+                     self.logger.error(f"Model object is None for {method_name}, skipping combination.")
+                     continue 
+                
+                # Identify NN-based models for parameter counting
+                nn_model_types = ['FixedKAN', 'MLP', 'WaveKAN', 'FourierKAN', 'JacobiKAN', 'ChebyKAN', 'TaylorKAN', 'RBFKAN']
+                if method_name in nn_model_types:
+                    p_count = count_parameters(model)
+                    self.logger.debug(f"{method_name} params: {p_count}")
+                else:
+                    p_count = -1 # Placeholder for GBTs
+                    self.logger.debug(f"{method_name} (Param count not applicable)")
+
+                # --- Handle Training/Evaluation based on Model Type --- #
+                if method_name in nn_model_types: # Check if it's an NN model
+                    # --- Optimizer for NN models ---
+                    lr = current_params.get('learning_rate', self.config.get('training',{}).get('learning_rate', 1e-3))
+                    optimizer_name = current_params.get('optimizer', self.config.get('training',{}).get('optimizer', 'Adam'))
+                    try:
+                        optimizer_cls = getattr(torch.optim, optimizer_name)
+                        optimizer = optimizer_cls(model.parameters(), lr=lr)
+                    except AttributeError:
+                        self.logger.error(f"Optimizer '{optimizer_name}' not found. Skipping.")
+                        if model: del model # Clean up model if optimizer fails
+                        torch.cuda.empty_cache(); gc.collect()
+                        continue
+                        
+                    # --- KAN Specific Optimization Step ---
+                    if method_name == 'FixedKAN':
+                        for kan_opt_method_name, kan_optimize_fn in kan_methods_to_run.items():
+                            self.logger.info(f"--- Running KAN Optimize: {kan_opt_method_name} ---")
+                            model_for_opt = model 
+                            optimizer_for_train = optimizer 
+                            kan_opt_time = 0.0
+                            kan_opt_start_time = time.time()
+                            try:
+                                kan_optimize_fn(model_for_opt, self.x_optimize, self.y_optimize_onehot, model_config_obj)
+                                kan_opt_time = time.time() - kan_opt_start_time
+                                self.logger.info(f"KAN Optimize ({kan_opt_method_name}) done: {kan_opt_time:.2f}s")
+                                current_run_config = {**current_params, 'kan_opt_method': kan_opt_method_name, 'kan_opt_time': kan_opt_time, 'param_count': p_count, 'model_type': method_name}
+                                _, _ = self._train_and_evaluate(model_for_opt, optimizer_for_train, f"KAN-{kan_opt_method_name}", current_run_config, num_epochs)
+                            except ImportError as ie:
+                                self.logger.warning(f"Skipping KAN Optimize {kan_opt_method_name}: {ie}")
+                            except Exception as e:
+                                self.logger.error(f"Error KAN Optimize {kan_opt_method_name}: {e}", exc_info=False)
                     
-                    current_run_config = {**base_config, 'opt_time': opt_time, 'param_count': p_count}
-                    params = [p for layer in kan.layers for p in [layer.combine_W, layer.combine_b] + [n.w for n in layer.neurons] + [n.b for n in layer.neurons]]
-                    optimizer = torch.optim.Adam(params, lr=lr)
+                    else: # MLP (or future NNs)
+                         current_run_config = {**current_params, 'param_count': p_count, 'model_type': method_name, 'kan_opt_method': 'N/A', 'kan_opt_time': 0.0}
+                         _, _ = self._train_and_evaluate(model, optimizer, method_name, current_run_config, num_epochs)
                     
-                    _, best_metric = self._train_and_evaluate(kan, optimizer, method_name, current_run_config, num_epochs)
+                    # Clean up NN model and optimizer
+                    del model, optimizer 
+
+                elif method_name in ['XGBoost', 'LightGBM']:
+                    # --- Train and Evaluate GBT model --- # 
+                    # We need the GBT-specific params (current_params) and the initialized model instance
+                    self._train_evaluate_gbt(model_instance_for_eval, method_name, current_params)
+                    del model_instance_for_eval # Clean up GBT model instance
                     
-                    is_better = (best_metric > best_configs_perf[method_name]['metric_val']) if self.higher_is_better else (best_metric < best_configs_perf[method_name]['metric_val'])
-                    if is_better:
-                         best_configs_perf[method_name] = {'metric_val': best_metric, 'config': current_run_config, 'time': opt_time}
-                         self.logger.info(f"** New best {method_name}: Val {self.primary_metric}={best_metric:.4f} **")
-                         best_models[method_name] = {'model_state': kan.state_dict(), 'kan_config': kan_config, 'best_metric_val': best_metric, 'opt_time': opt_time}
-                            
-                except ImportError as ie: self.logger.warning(f"Skipping {method_name}: {ie}"); # Add placeholder...
-                except Exception as e: self.logger.error(f"Error {method_name} (Cfg: {base_config}): {e}", exc_info=False) # Shorter error log
-                finally: del kan; torch.cuda.empty_cache(); gc.collect()
-        main_pbar.close()
+                else:
+                    # Should not be reached if model init checks passed
+                    self.logger.error(f"Logic error: Reached unexpected training path for {method_name}.")
+                
+                # Common cleanup
+                if torch.cuda.is_available(): torch.cuda.empty_cache()
+                gc.collect()
+            # End of hyperparameter combinations loop
+            main_pbar.close()
+            # End of model type loop
+
+        # --- Save Final Results (using the member self.results_df) --- 
+        results_path = os.path.join(self.results_dir, f'{self.dataset_name}_grid_search_comparison_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+        try:
+            if not self.results_df.empty:
+                 self.results_df = self.results_df.round(6)
+                 # Define desired column order
+                 core_cols = ['model_type', 'kan_opt_method', f'val_{self.primary_metric}', 'train_{self.primary_metric}', 'val_loss', 'train_loss', 'param_count', 'kan_opt_time', 'epoch']
+                 # Ensure core columns exist, handle potential missing ones gracefully
+                 existing_core_cols = [c for c in core_cols if c in self.results_df.columns]
+                 # Get remaining columns (parameters)
+                 param_cols = sorted([k for k in self.results_df.columns if k not in existing_core_cols])
+                 final_cols = existing_core_cols + param_cols
+                 self.results_df = self.results_df[final_cols] # Reorder
+                 self.results_df.to_csv(results_path, index=False)
+                 self.logger.info(f"Grid search results saved: {results_path}")
+            else:
+                 self.logger.warning("No results were generated to save.")
+        except Exception as e:
+            self.logger.error(f"Failed to save results CSV: {e}")
+
+    def _create_mlp(self, layers: List[int], activation: str) -> nn.Sequential:
+        """Helper to create a simple MLP.
         
-        self.logger.info(f"\n=== Best Configurations for {self.dataset_name} ===")
-        for method, result in best_configs_perf.items():
-            if result['config']: self.logger.info(f"{method}: Val {self.primary_metric}={result['metric_val']:.4f}, Time={result['time']:.2f}s, Cfg={result['config']}")
-            if best_models.get(method): # Save best model
-                save_path = os.path.join(self.results_dir, f'kan_{method.lower()}_best.pth')
-                try: torch.save(best_models[method], save_path); self.logger.info(f"Saved best {method} model: {save_path}")
-                except Exception as e: self.logger.error(f"Failed to save model {method}: {e}")
-            elif result['config']: self.logger.warning(f"No best model state found for {method}, though config exists.")
-            else: self.logger.warning(f"No successful runs for {method}.")
+        Args:
+            layers: List of integers defining layer sizes (including input and output).
+            activation: String name of the activation function (e.g., 'ReLU', 'GELU').
+            
+        Returns:
+            An nn.Sequential MLP model.
+        """
+        net = nn.Sequential()
+        try:
+            activation_fn = getattr(nn, activation)
+        except AttributeError:
+            self.logger.error(f"Activation function '{activation}' not found in torch.nn. Defaulting to ReLU.")
+            activation_fn = nn.ReLU
+            
+        self.logger.info(f"Creating MLP with layers: {layers} and activation: {activation_fn.__name__}")
         
-        results_path = os.path.join(self.results_dir, f'{self.dataset_name}_optimization_comparison.csv')
-        try: self.results_df.round(6).to_csv(results_path, index=False); self.logger.info(f"Results saved: {results_path}")
-        except Exception as e: self.logger.error(f"Failed to save results CSV: {e}")
+        if len(layers) < 2:
+            self.logger.error("MLP needs at least an input and output layer.")
+            return None # Return None on error
+
+        for i in range(len(layers) - 1):
+            try:
+                net.add_module(f"linear_{i}", nn.Linear(layers[i], layers[i+1]))
+                if i < len(layers) - 2: # No activation after the output layer
+                    net.add_module(f"activation_{i}", activation_fn())
+            except Exception as e:
+                 self.logger.error(f"Error adding layer {i} (Linear {layers[i]}->{layers[i+1]} or Activation {activation}) to MLP: {e}")
+                 return None # Return None on error
+                    
+        return net # Return the constructed network
 
     # --- Plotting --- 
     def plot_results(self):
         """Plot comparison results based on task type and primary metric."""
         if self.results_df.empty: self.logger.warning("No results to plot."); return
         
-        plot_dir = self.results_dir; ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        plot_dir = self.config.get('plotting', {}).get('plot_dir', self.results_dir)
+        os.makedirs(plot_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         metric_col = f'val_{self.primary_metric}'
         metric_name = f"Validation {self.primary_metric.upper() if self.primary_metric == 'mse' else self.primary_metric.capitalize()}"
         loss_col = 'val_loss'
         
-        # 1. Plot primary metric vs epoch
+        # --- Plot 1: Primary Metric vs Epoch (Best Config per Method/Run Type) --- #
         plt.figure(figsize=(10, 6))
-        has_data = False
-        valid_methods = self.results_df.dropna(subset=[metric_col])['opt_method'].unique()
-        for method in valid_methods:
-            method_data = self.results_df[self.results_df['opt_method'] == method].copy()
-            method_data.dropna(subset=[metric_col], inplace=True)
-            if method_data.empty:
-                 continue # Skip method if no valid data after dropna
-            
-            # Find best config using self.higher_is_better
-            if self.higher_is_better:
-                 best_configs_idx = method_data.loc[method_data.groupby('config')[metric_col].idxmax()]
-                 best_config_idx = best_configs_idx[metric_col].idxmax()
-            else: # Lower is better (MSE)
-                 best_configs_idx = method_data.loc[method_data.groupby('config')[metric_col].idxmin()]
-                 best_config_idx = best_configs_idx[metric_col].idxmin()
-            
-            best_config_str = method_data.loc[best_config_idx, 'config']
-            best_data = method_data[method_data['config'] == best_config_str]
-            if best_data.empty:
-                 continue # Skip if best config data is somehow empty (shouldn't happen)
-            plt.plot(best_data['epoch'], best_data[metric_col], label=f"{method} (Best Cfg)", lw=2); has_data = True
+        has_epoch_data = False
         
-        if has_data:
-            plt.title(f"{metric_name} vs Epoch (Best Config per Method) - {self.dataset_name}"); plt.xlabel("Epoch"); plt.ylabel(metric_name)
-            if self.primary_metric == 'mse': plt.yscale('log')
-            plt.grid(True, alpha=0.4); plt.legend(); plt.tight_layout()
-            path = os.path.join(plot_dir, f'{self.dataset_name}_{self.primary_metric}_epoch_{ts}.png')
+        # Filter results to only include runs with epoch data (epoch != -1 or not NaN)
+        epoch_results_df = self.results_df[self.results_df['epoch'].notna() & (self.results_df['epoch'] != -1)].copy()
+        
+        if not epoch_results_df.empty:
+            group_cols = ['model_type', 'kan_opt_method']
+            if epoch_results_df['kan_opt_method'].isnull().all() or (epoch_results_df['kan_opt_method'] == 'N/A').all():
+                 group_cols.remove('kan_opt_method')
+
+            # Find the best final metric achieved for each group combination *within epoch data*
+            if self.higher_is_better:
+                best_epoch_final_metrics = epoch_results_df.loc[epoch_results_df.groupby(group_cols)[metric_col].idxmax()]
+            else:
+                best_epoch_final_metrics = epoch_results_df.loc[epoch_results_df.groupby(group_cols)[metric_col].idxmin()]
+                
+            plotted_labels = set()
+            for idx, best_run_summary in best_epoch_final_metrics.iterrows():
+                config_str = best_run_summary['config']
+                model_type = best_run_summary['model_type']
+                kan_opt_method = best_run_summary.get('kan_opt_method', 'N/A')
+                
+                plot_label = f"{model_type}"
+                if pd.notna(kan_opt_method) and kan_opt_method != 'N/A':
+                    plot_label += f" ({kan_opt_method})"
+                
+                if plot_label in plotted_labels: continue
+                plotted_labels.add(plot_label)
+                
+                # Filter the original epoch DataFrame for all epochs of this specific best run configuration
+                run_data = epoch_results_df[
+                    (epoch_results_df['config'] == config_str) &
+                    (epoch_results_df['model_type'] == model_type) &
+                    (epoch_results_df['kan_opt_method'].fillna('N/A') == pd.Series([kan_opt_method]).fillna('N/A')[0])
+                ].copy()
+                run_data.dropna(subset=[metric_col, 'epoch'], inplace=True)
+
+                if not run_data.empty:
+                    plt.plot(run_data['epoch'], run_data[metric_col], label=f"{plot_label} (Best Cfg)", lw=2, alpha=0.8)
+                    has_epoch_data = True # Mark that we plotted something
+            
+            if has_epoch_data:
+                plt.title(f"{metric_name} vs Epoch (Best Config per NN Method/Run) - {self.dataset_name}")
+                plt.xlabel("Epoch"); plt.ylabel(metric_name)
+                if self.primary_metric == 'mse': plt.yscale('log')
+                plt.grid(True, alpha=0.4); plt.legend(); plt.tight_layout()
+                path = os.path.join(plot_dir, f'{self.dataset_name}_{self.primary_metric}_epoch_{ts}.png')
+                try: plt.savefig(path, bbox_inches='tight'); self.logger.info(f"Saved plot: {path}")
+                except Exception as e: self.logger.error(f"Save plot error: {e}")
+                plt.close()
+            else:
+                 self.logger.info("No epoch-based results found to plot metric vs epoch."); plt.close()
+        else:
+            self.logger.info("No epoch-based results found in DataFrame to plot metric vs epoch."); plt.close()
+             
+        # --- Summary Plots (Using ALL results, including GBTs) --- #
+        # Find the best overall result row for each unique run type (model_type + kan_opt_method)
+        summary_group_cols = ['model_type', 'kan_opt_method']
+        if self.results_df['kan_opt_method'].isnull().all() or (self.results_df['kan_opt_method'] == 'N/A').all():
+             summary_group_cols.remove('kan_opt_method')
+             
+        if self.higher_is_better:
+            best_summary_metrics = self.results_df.loc[self.results_df.groupby(summary_group_cols)[metric_col].idxmax()]
+        else:
+            best_summary_metrics = self.results_df.loc[self.results_df.groupby(summary_group_cols)[metric_col].idxmin()]
+        
+        summary_df = best_summary_metrics.copy()
+        summary_df.dropna(subset=['param_count', metric_col], how='any', inplace=True) # Drop if no params OR no metric
+        
+        if summary_df.empty:
+             self.logger.warning(f"No summary data found after dropping NaNs."); return
+             
+        summary_df['plot_label'] = summary_df.apply(lambda row: f"{row['model_type']}" + (f" ({row['kan_opt_method']})" if pd.notna(row['kan_opt_method']) and row['kan_opt_method'] != 'N/A' else ""), axis=1)
+        methods = summary_df['plot_label'].tolist()
+        metrics = summary_df[metric_col].tolist()
+        params = summary_df['param_count'].tolist()
+        
+        colors = plt.cm.viridis(np.linspace(0, 1, len(methods)))
+        
+        # 2. Opt Time Plot (Only KAN)
+        kan_summary_df = summary_df[(summary_df['model_type'] == 'FixedKAN') & summary_df['kan_opt_time'].notna() & (summary_df['kan_opt_time'] > 0)]
+        if not kan_summary_df.empty:
+            kan_methods = kan_summary_df['plot_label'].tolist()
+            kan_times = kan_summary_df['kan_opt_time'].tolist()
+            kan_colors = plt.cm.viridis(np.linspace(0, 1, len(kan_methods)))
+            plt.figure(figsize=(max(8, len(kan_methods)*1.5), 5))
+            bars = plt.bar(kan_methods, kan_times, color=kan_colors)
+            for bar, t in zip(bars, kan_times): plt.text(bar.get_x() + bar.get_width()/2, bar.get_height()*1.01, f'{t:.2f}s', ha='center', va='bottom', fontsize=9)
+            plt.title(f'KAN Optimize Time (Best Config per Method) - {self.dataset_name}')
+            plt.ylabel('Time (s)'); plt.xticks(rotation=30, ha='right'); plt.grid(axis='y', ls='--', alpha=0.6); plt.tight_layout()
+            path = os.path.join(plot_dir, f'{self.dataset_name}_kan_opttimes_{ts}.png')
             try: plt.savefig(path, bbox_inches='tight'); self.logger.info(f"Saved plot: {path}")
             except Exception as e: self.logger.error(f"Save plot error: {e}")
             plt.close()
         else:
-             self.logger.warning(f"No valid data to plot for {metric_name}."); plt.close()
-             
-        # --- Summary Plots ---
-        summary_df = self.results_df.dropna(subset=['opt_time', metric_col]).copy()
-        if summary_df.empty: self.logger.warning(f"No summary data (opt_time, {metric_col}) to plot."); return
-        # Get best run per method using self.higher_is_better
-        if self.higher_is_better:
-            best_runs = summary_df.loc[summary_df.groupby('opt_method')[metric_col].idxmax()]
-        else:
-            best_runs = summary_df.loc[summary_df.groupby('opt_method')[metric_col].idxmin()]
-        if best_runs.empty: self.logger.warning("No best runs for summary plots."); return
+             self.logger.info("No KAN optimize times found to plot.")
 
-        methods = best_runs['opt_method'].tolist(); times = best_runs['opt_time'].tolist(); metrics = best_runs[metric_col].tolist()
-        colors = plt.cm.viridis(np.linspace(0, 1, len(methods)))
-        
-        # 2. Opt Time Plot
-        plt.figure(figsize=(8, 5)); bars = plt.bar(methods, times, color=colors)
-        for bar, t in zip(bars, times): plt.text(bar.get_x() + bar.get_width()/2, bar.get_height()*1.01, f'{t:.2f}s', ha='center', va='bottom', fontsize=9)
-        plt.title(f'KAN Opt Time (Best Config) - {self.dataset_name}'); plt.ylabel('Time (s)'); plt.grid(axis='y', ls='--', alpha=0.6); plt.tight_layout()
-        path = os.path.join(plot_dir, f'{self.dataset_name}_opttimes_{ts}.png')
-        try: plt.savefig(path, bbox_inches='tight'); self.logger.info(f"Saved plot: {path}")
-        except Exception as e: self.logger.error(f"Save plot error: {e}")
-        plt.close()
-
-        # 3. Final Performance Plot
-        plt.figure(figsize=(8, 5)); bars = plt.bar(methods, metrics, color=colors)
+        # 3. Final Performance Plot (All Methods)
+        if not methods: self.logger.warning("No methods found for final performance plot."); return
+        plt.figure(figsize=(max(8, len(methods)*1.5), 5));
+        bars = plt.bar(methods, metrics, color=colors)
         for bar, m in zip(bars, metrics): plt.text(bar.get_x() + bar.get_width()/2, bar.get_height()*1.01, f'{m:.4f}', ha='center', va='bottom', fontsize=9)
-        plt.title(f'Final {metric_name} (Best Config) - {self.dataset_name}'); plt.ylabel(metric_name)
+        plt.title(f'Final Best {metric_name} - {self.dataset_name}'); plt.ylabel(metric_name)
+        plt.xticks(rotation=30, ha='right')
         min_m = min(metrics) if metrics else 0
         bot_lim = min(0, min_m - abs(min_m*0.1)) if self.primary_metric == 'r2' else 0
         plt.ylim(bottom=bot_lim)
-        if self.primary_metric == 'accuracy': plt.ylim(top=1.05)
+        if self.primary_metric == 'accuracy': plt.ylim(top=max(1.0, max(metrics)*1.05) if metrics else 1.05)
         plt.grid(axis='y', ls='--', alpha=0.6); plt.tight_layout()
         path = os.path.join(plot_dir, f'{self.dataset_name}_final_{self.primary_metric}_{ts}.png')
         try: plt.savefig(path, bbox_inches='tight'); self.logger.info(f"Saved plot: {path}")
         except Exception as e: self.logger.error(f"Save plot error: {e}")
         plt.close()
+        
+        # 4. Performance vs Parameter Count (Filter out GBTs with placeholder param count)
+        nn_summary_df = summary_df[summary_df['param_count'] != -1].copy()
+        if not nn_summary_df.empty:
+            plt.figure(figsize=(10, 6))
+            unique_method_types = nn_summary_df['model_type'].unique()
+            scatter_colors = plt.cm.tab10(np.linspace(0, 1, len(unique_method_types)))
+            color_map = {mtype: scatter_colors[i] for i, mtype in enumerate(unique_method_types)}
+            
+            plotted_labels_scatter = set() # Avoid duplicate labels in scatter
+            for i, row in nn_summary_df.iterrows():
+                label = row['plot_label']
+                if label not in plotted_labels_scatter:
+                     plt.scatter(row['param_count'], row[metric_col], 
+                                 label=label, 
+                                 color=color_map[row['model_type']],
+                                 s=80, alpha=0.7)
+                     plotted_labels_scatter.add(label)
+                else: # Plot subsequent points without label
+                    plt.scatter(row['param_count'], row[metric_col], 
+                                 color=color_map[row['model_type']],
+                                 s=80, alpha=0.7)
+            
+            # Create legend based on unique labels plotted
+            handles, labels = plt.gca().get_legend_handles_labels()
+            # Filter unique labels/handles if needed, but direct use might be fine
+            plt.legend(title="Model/Run Types", handles=handles, labels=labels, bbox_to_anchor=(1.05, 1), loc='upper left')
+
+            plt.xlabel("Number of Parameters (Log Scale)")
+            plt.ylabel(f"Best Validation {self.primary_metric.upper()}")
+            plt.xscale('log')
+            if self.primary_metric == 'mse': plt.yscale('log')
+            plt.title(f"Performance vs Parameter Count (NNs) - {self.dataset_name}")
+            plt.grid(True, which='both', linestyle='--', linewidth=0.5); plt.tight_layout(rect=[0, 0, 0.85, 1]) # Adjust layout for external legend
+            path = os.path.join(plot_dir, f'{self.dataset_name}_perf_vs_params_{ts}.png')
+            try: plt.savefig(path, bbox_inches='tight'); self.logger.info(f"Saved plot: {path}")
+            except Exception as e: self.logger.error(f"Save plot error: {e}")
+            plt.close()
+        else:
+            self.logger.info("No NN results with valid parameter counts found to plot performance vs params.")
+
+    def _train_evaluate_gbt(self, model_instance, model_name: str, params: Dict):
+        """Trains and evaluates a Gradient Boosting Tree model (XGBoost, LightGBM).
+        
+        Appends a single row with final validation performance to self.results_df.
+        Assumes model_instance is a scikit-learn compatible classifier/regressor.
+        """
+        self.logger.info(f"Training and evaluating {model_name} with params: {params}")
+        start_time = time.time()
+
+        # Convert data to NumPy (if not already)
+        # GBTs typically work best with original data before scaling for NNs, 
+        # but for fair comparison let's use the scaled data prepared for NNs.
+        # Note: This might disadvantage GBTs slightly.
+        if isinstance(self.x_train, torch.Tensor):
+            X_train_np = self.x_train.cpu().numpy()
+            y_train_np = self.y_train.cpu().numpy()
+            X_val_np = self.x_val.cpu().numpy()
+            y_val_np = self.y_val.cpu().numpy()
+        else: # Assuming already NumPy
+            X_train_np = self.x_train
+            y_train_np = self.y_train
+            X_val_np = self.x_val
+            y_val_np = self.y_val
+            
+        # Squeeze target if necessary (e.g., if it's [N, 1])
+        if y_train_np.ndim > 1 and y_train_np.shape[1] == 1:
+             y_train_np = y_train_np.squeeze()
+        if y_val_np.ndim > 1 and y_val_np.shape[1] == 1:
+             y_val_np = y_val_np.squeeze()
+
+        try:
+            # Set model parameters before fitting
+            # GBT models often take params in __init__, but set_params works too
+            model_instance.set_params(**params)
+            
+            # Fit the model
+            # Add early stopping if possible? Requires eval_set
+            fit_params = {}
+            if isinstance(model_instance, (xgb.XGBClassifier, xgb.XGBRegressor, lgb.LGBMClassifier, lgb.LGBMRegressor)):
+                 fit_params['eval_set'] = [(X_val_np, y_val_np)]
+                 fit_params['early_stopping_rounds'] = self.config.get('training',{}).get('gbt_early_stopping_rounds', 10) # Configurable patience
+                 fit_params['verbose'] = False # Suppress verbose GBT output
+            
+            model_instance.fit(X_train_np, y_train_np, **fit_params)
+            train_time = time.time() - start_time
+            self.logger.info(f"{model_name} fitting completed in {train_time:.2f}s")
+
+            # Evaluate
+            val_metric = None
+            train_metric = None # Optional: calculate train metric too
+            val_loss = np.nan # Loss not directly comparable
+            train_loss = np.nan
+
+            if self.task_type == 'classification':
+                y_pred_val = model_instance.predict(X_val_np)
+                y_pred_train = model_instance.predict(X_train_np)
+                val_metric = accuracy_score(y_val_np, y_pred_val)
+                train_metric = accuracy_score(y_train_np, y_pred_train)
+                # Try to get logloss if possible (requires predict_proba)
+                try:
+                    y_prob_val = model_instance.predict_proba(X_val_np)
+                    y_prob_train = model_instance.predict_proba(X_train_np)
+                    # Use scikit-learn log_loss
+                    from sklearn.metrics import log_loss
+                    val_loss = log_loss(y_val_np, y_prob_val)
+                    train_loss = log_loss(y_train_np, y_prob_train)
+                except Exception:
+                    self.logger.debug(f"Could not calculate log_loss for {model_name}.")
+                    
+            else: # Regression
+                y_pred_val = model_instance.predict(X_val_np)
+                y_pred_train = model_instance.predict(X_train_np)
+                # Calculate primary metric (e.g., r2) and loss (mse)
+                if self.primary_metric == 'r2':
+                     from sklearn.metrics import r2_score as sk_r2_score # Avoid name clash
+                     val_metric = sk_r2_score(y_val_np, y_pred_val)
+                     train_metric = sk_r2_score(y_train_np, y_pred_train)
+                     val_loss = mean_squared_error(y_val_np, y_pred_val)
+                     train_loss = mean_squared_error(y_train_np, y_pred_train)
+                else: # Assume primary metric is mse
+                     val_metric = mean_squared_error(y_val_np, y_pred_val)
+                     train_metric = mean_squared_error(y_train_np, y_pred_train)
+                     val_loss = val_metric
+                     train_loss = train_metric
+
+            self.logger.info(f"{model_name} Eval: Val {self.primary_metric}={val_metric:.4f}, Train {self.primary_metric}={train_metric:.4f}")
+
+            # Append result to DataFrame
+            row_data = {
+                'model_type': model_name,
+                'kan_opt_method': 'N/A',
+                'kan_opt_time': 0.0,
+                'param_count': -1, # Parameter count is not straightforward for GBTs
+                f'val_{self.primary_metric}': val_metric,
+                f'train_{self.primary_metric}': train_metric, # Include train metric
+                'val_loss': val_loss, # Include loss
+                'train_loss': train_loss,
+                'epoch': -1, # Mark as non-epoch-based
+                'fit_time': train_time, # Store fit time
+                'config': str(params), # Store hyperparams used
+                 **params # Also store params flattened
+            }
+            new_row = pd.DataFrame([row_data])
+            if self.results_df.empty:
+                 self.results_df = new_row
+            else:
+                 # Ensure all columns exist before concat
+                 shared_cols = self.results_df.columns.intersection(new_row.columns)
+                 missing_in_df = new_row.columns.difference(self.results_df.columns)
+                 missing_in_row = self.results_df.columns.difference(new_row.columns)
+                 for col in missing_in_df: self.results_df[col] = pd.NA
+                 for col in missing_in_row: new_row[col] = pd.NA
+                 # Align columns before concat
+                 self.results_df = pd.concat([self.results_df.reindex(columns=new_row.columns, fill_value=pd.NA),
+                                            new_row], ignore_index=True)
+
+        except Exception as e:
+            self.logger.error(f"Error during training/evaluation for {model_name} with params {params}: {e}", exc_info=True)
+            # Optionally append a row indicating failure?
 
 # Main block for direct testing
 if __name__ == "__main__":

@@ -80,55 +80,38 @@ def main():
     if 'dataset' not in config or 'name' not in config['dataset']:
         logger.error("Configuration file must contain 'dataset' section with a 'name' key.")
         sys.exit(1)
-    if 'parameter_grid' not in config:
-        logger.error("Configuration file must contain 'parameter_grid' section.")
+    if 'parameter_grids' not in config:
+        logger.error("Configuration file must contain 'parameter_grids' section.")
         sys.exit(1)
 
-    # Initialize Experiment Runner with the full config
+    # Initialize the runner with the full config
     try:
-        runner = ExperimentRunner(config=config)
+        runner = ExperimentRunner(config)
     except Exception as e:
-        logger.error(f"Error initializing ExperimentRunner: {e}", exc_info=True)
-        sys.exit(1)
+        logger.exception(f"Failed to initialize ExperimentRunner: {e}")
+        exit()
 
-    # Select parameter grid
-    grid_config = config.get('parameter_grid', {})
-    grid_key = 'default'
-    if args.quick and 'quick' in grid_config:
-        grid_key = 'quick'
-        logger.info("Using 'quick' parameter grid from config")
-    elif args.full and 'full' in grid_config:
-        grid_key = 'full'
-        logger.info("Using 'full' parameter grid from config")
-    elif args.grid_key in grid_config:
-        grid_key = args.grid_key
-        logger.info(f"Using '{grid_key}' parameter grid from config")
-    elif 'default' not in grid_config:
-        logger.error("No 'default', 'quick', or 'full' grid found, and no valid --grid_key specified.")
-        sys.exit(1)
-    else:
-         logger.info("Using 'default' parameter grid from config")
-
-    param_grid = grid_config.get(grid_key)
-    if param_grid is None:
-         logger.error(f"Selected parameter grid key '{grid_key}' not found or is empty in the config file!")
-         sys.exit(1)
-
-    logger.info(f"Selected Parameter Grid ('{grid_key}'): {param_grid}")
-    logger.info(f"Training for {num_epochs} epochs")
-
-    # Run the experiment (grid search)
+    # Run grid search - runner now handles grid extraction internally
     try:
-        logger.info(f"Starting KAN optimization grid search for dataset: {runner.dataset_name}")
-        runner.run_grid_search(param_grid, num_epochs=num_epochs)
-
-        # Plot results
-        logger.info("Plotting results")
-        runner.plot_results()
-        logger.info("Experiment completed successfully!")
+        # Removed param_grid extraction
+        # Call run_grid_search without the param_grid argument
+        runner.run_grid_search(num_epochs=config.get('num_epochs', 50))
     except Exception as e:
-        logger.error(f"Error during experiment execution: {str(e)}", exc_info=True)
-        raise
+        logger.exception(f"An error occurred during grid search: {e}")
+        exit()
+
+    # Plot results if configured
+    try:
+        if config.get('plotting', {}).get('plot_results', False):
+            logger.info("Generating plots...")
+            runner.plot_results()
+            logger.info("Plotting complete.")
+        else:
+            logger.info("Plotting skipped based on config.")
+    except Exception as e:
+        logger.exception(f"An error occurred during plotting: {e}")
+
+    logger.info(f"Experiment '{config.get('experiment_name', 'Unnamed')}' finished.")
 
 if __name__ == "__main__":
     main() 
