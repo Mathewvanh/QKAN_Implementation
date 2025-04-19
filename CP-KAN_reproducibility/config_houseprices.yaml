@@ -1,0 +1,31 @@
+# Configuration for KAN Optimization Comparison on House Sales (INRIA)
+
+experiment_name: "HousePrices_KAN_OptComparison"
+random_seed: 42
+num_epochs: 100 # More epochs might be needed for regression
+results_dir: "results_houseprices" # Specific results directory
+
+dataset:
+  name: "house_sales" # Changed from california_housing to match loader dispatch
+  task_type: "regression" # Explicitly state task type
+  primary_metric: "mse" # Specify MSE as the primary metric (lower is better)
+  # Splitting params (used by _load_house_prices in runner)
+  test_split: 0.2
+  val_from_train_split: 0.2
+
+# Define model and parameters to search
+# Currently, runner only supports FixedKAN optimization comparison
+model_type: "FixedKAN" # For future use when comparing models
+
+parameter_grid: # Grid specifically for FixedKAN on House Prices
+  default:
+    max_degree: [3, 5, 7]
+    hidden_size: [16, 32] # Example sizes, adjust as needed
+    learning_rate: [0.01, 0.005, 0.001]
+  quick:
+    max_degree: [5]
+    hidden_size: [16]
+    learning_rate: [0.005]
+
+# List of KAN optimization methods to compare (optional, defaults to all)
+# methods_to_run: ["QUBO", "GreedyHeuristic"] 
