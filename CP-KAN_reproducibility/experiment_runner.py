@@ -20,12 +20,14 @@ from data_pipeline import DataPipeline, DataConfig # For Jane Street & its confi
 from sklearn.datasets import fetch_california_housing # For House Prices
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, mean_squared_error, r2_score as sk_r2_score # Added MSE, aliased r2_score
 import torchvision # For MNIST/CIFAR
 import torchvision.transforms as transforms
 from datasets import load_dataset # Added for Hugging Face datasets
 # GBT Imports
 import xgboost as xgb
 import lightgbm as lgb
+from lightgbm import early_stopping # Import the callback
 
 # Local imports
 from CP_KAN import FixedKANConfig, FixedKAN
@@ -84,22 +86,30 @@ class ExperimentRunner:
         self.results_dir = config['results_dir']
         self.dataset_config = config['dataset']
         self.dataset_name = self.dataset_config['name']
+        
+        # --- Initialize Logger Early --- #
+        self.logger = logging.getLogger("ExperimentRunner")
+        self.logger.setLevel(logging.INFO) # Set default level
+        # Configure logging (e.g., level from config) if needed here
+        # Basic handler setup if not already configured by main script
+        if not self.logger.hasHandlers():
+            stream_handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - [%(levelname)s] - %(name)s - %(message)s')
+            stream_handler.setFormatter(formatter)
+            self.logger.addHandler(stream_handler)
+            # Optionally add FileHandler here too if main script doesn't handle it
+
+        # --- Determine Task Type and Metric (Now logger is available) --- #
         self.task_type = self._determine_task_type()
         self.primary_metric = self._determine_primary_metric()
-        self.higher_is_better = self.primary_metric in ['r2', 'accuracy']
+        self.higher_is_better = self.primary_metric in ['r2', 'accuracy', 'weighted_r2'] # Added weighted_r2
 
         os.makedirs(self.results_dir, exist_ok=True)
-        
         self.results_df = pd.DataFrame()
         
-        self.logger = logging.getLogger("ExperimentRunner")
-        self.logger.setLevel(logging.INFO)
-        if not self.logger.hasHandlers():
-            self.logger.addHandler(logging.StreamHandler())
-
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger.info(f"Using device: {self.device}")
-        self.logger.info(f"Primary metric: {self.primary_metric} (Higher is better: {self.higher_is_better})")
+        self.logger.info(f"Primary metric: {self.primary_metric} (Higher is better: {self.higher_is_better}) - Task: {self.task_type}")
 
         self._load_data()
         self._prepare_optimize_data() # Ensure this call exists
@@ -643,30 +653,17 @@ class ExperimentRunner:
                         
                     # --- End EasyTSF KAN Variants --- #
                     
-                    elif method_name == 'XGBoost':
-                        self.logger.debug(f"Initializing XGBoost...")
-                        model_config_obj = current_params # Store params for GBT
-                        gbt_params = {k: v for k, v in current_params.items() if k not in ['learning_rate']} # Pop LR if using xgb specific one
-                        gbt_params['random_state'] = self.config.get('random_seed', 42)
-                        gbt_params['use_label_encoder'] = False # Suppress warning
-                        gbt_params['eval_metric'] = 'logloss' if self.task_type == 'classification' else 'rmse' # Set appropriate eval metric
-                        if self.task_type == 'classification':
-                            model = xgb.XGBClassifier(**gbt_params)
-                        else: # Regression
-                            model = xgb.XGBRegressor(**gbt_params)
-                        model_instance_for_eval = model # Use the same instance
-                        
                     elif method_name == 'LightGBM':
                         self.logger.debug(f"Initializing LightGBM...")
                         model_config_obj = current_params # Store params for GBT
-                        gbt_params = {k: v for k, v in current_params.items() if k not in ['learning_rate']} # Pop LR if using lgbm specific one
+                        gbt_params = {k: v for k, v in current_params.items() if k not in ['learning_rate']} 
                         gbt_params['random_state'] = self.config.get('random_seed', 42)
-                        gbt_params['verbose'] = -1 # Suppress verbosity
+                        gbt_params['verbose'] = -1
                         if self.task_type == 'classification':
                             model = lgb.LGBMClassifier(**gbt_params)
-                        else: # Regression
+                        else: 
                             model = lgb.LGBMRegressor(**gbt_params)
-                        model_instance_for_eval = model # Use the same instance
+                        model_instance_for_eval = model 
                         
                     else:
                         self.logger.warning(f"Unsupported model type '{method_name}' during initialization. Skipping.")
@@ -675,18 +672,19 @@ class ExperimentRunner:
                     self.logger.error(f"Error initializing {method_name} with params {current_params}: {e}", exc_info=True)
                     continue 
                 
-                # --- Proceed only if model initialized successfully --- #
-                if model is None and method_name not in ['XGBoost', 'LightGBM']: # GBT models are initialized directly above
-                     self.logger.error(f"Model object is None for {method_name}, skipping combination.")
+                # Check if model initialization succeeded before proceeding
+                model_initialized = (model is not None) or (method_name == 'LightGBM' and model_instance_for_eval is not None)
+                if not model_initialized:
+                     self.logger.error(f"Model object is None/not initialized for {method_name}, skipping combination.")
                      continue 
                 
-                # Identify NN-based models for parameter counting
+                # Get param count for NNs, use placeholder for GBTs
                 nn_model_types = ['FixedKAN', 'MLP', 'WaveKAN', 'FourierKAN', 'JacobiKAN', 'ChebyKAN', 'TaylorKAN', 'RBFKAN']
                 if method_name in nn_model_types:
                     p_count = count_parameters(model)
                     self.logger.debug(f"{method_name} params: {p_count}")
-                else:
-                    p_count = -1 # Placeholder for GBTs
+                else: # GBTs (LightGBM)
+                    p_count = -1 
                     self.logger.debug(f"{method_name} (Param count not applicable)")
 
                 # --- Handle Training/Evaluation based on Model Type --- #
@@ -699,11 +697,9 @@ class ExperimentRunner:
                         optimizer = optimizer_cls(model.parameters(), lr=lr)
                     except AttributeError:
                         self.logger.error(f"Optimizer '{optimizer_name}' not found. Skipping.")
-                        if model: del model # Clean up model if optimizer fails
+                        if model: del model 
                         torch.cuda.empty_cache(); gc.collect()
                         continue
-                        
-                    # --- KAN Specific Optimization Step ---
                     if method_name == 'FixedKAN':
                         for kan_opt_method_name, kan_optimize_fn in kan_methods_to_run.items():
                             self.logger.info(f"--- Running KAN Optimize: {kan_opt_method_name} ---")
@@ -721,27 +717,17 @@ class ExperimentRunner:
                                 self.logger.warning(f"Skipping KAN Optimize {kan_opt_method_name}: {ie}")
                             except Exception as e:
                                 self.logger.error(f"Error KAN Optimize {kan_opt_method_name}: {e}", exc_info=False)
-                    
-                    else: # MLP (or future NNs)
-                         current_run_config = {**current_params, 'param_count': p_count, 'model_type': method_name, 'kan_opt_method': 'N/A', 'kan_opt_time': 0.0}
-                         _, _ = self._train_and_evaluate(model, optimizer, method_name, current_run_config, num_epochs)
-                    
-                    # Clean up NN model and optimizer
+                    else: # Other NNs (MLP, WaveKAN, etc.)
+                        current_run_config = {**current_params, 'param_count': p_count, 'model_type': method_name, 'kan_opt_method': 'N/A', 'kan_opt_time': 0.0}
+                        _, _ = self._train_and_evaluate(model, optimizer, method_name, current_run_config, num_epochs)
                     del model, optimizer 
 
-                elif method_name in ['XGBoost', 'LightGBM']:
-                    # --- Train and Evaluate GBT model --- # 
-                    # We need the GBT-specific params (current_params) and the initialized model instance
+                elif method_name == 'LightGBM': # Only LightGBM remains here
                     self._train_evaluate_gbt(model_instance_for_eval, method_name, current_params)
-                    del model_instance_for_eval # Clean up GBT model instance
+                    del model_instance_for_eval 
                     
                 else:
-                    # Should not be reached if model init checks passed
                     self.logger.error(f"Logic error: Reached unexpected training path for {method_name}.")
-                
-                # Common cleanup
-                if torch.cuda.is_available(): torch.cuda.empty_cache()
-                gc.collect()
             # End of hyperparameter combinations loop
             main_pbar.close()
             # End of model type loop
@@ -1006,11 +992,23 @@ class ExperimentRunner:
             # Fit the model
             # Add early stopping if possible? Requires eval_set
             fit_params = {}
-            if isinstance(model_instance, (xgb.XGBClassifier, xgb.XGBRegressor, lgb.LGBMClassifier, lgb.LGBMRegressor)):
+            callbacks = [] # Initialize callbacks list
+            if isinstance(model_instance, (xgb.XGBClassifier, xgb.XGBRegressor)):
                  fit_params['eval_set'] = [(X_val_np, y_val_np)]
-                 fit_params['early_stopping_rounds'] = self.config.get('training',{}).get('gbt_early_stopping_rounds', 10) # Configurable patience
-                 fit_params['verbose'] = False # Suppress verbose GBT output
-            
+                 fit_params['early_stopping_rounds'] = self.config.get('training',{}).get('gbt_early_stopping_rounds', 10)
+                 # fit_params['verbose'] = False # XGBoost uses early_stopping_rounds
+            elif isinstance(model_instance, (lgb.LGBMClassifier, lgb.LGBMRegressor)):
+                 fit_params['eval_set'] = [(X_val_np, y_val_np)]
+                 # Use LightGBM callbacks for early stopping
+                 stopping_rounds = self.config.get('training',{}).get('gbt_early_stopping_rounds', 10)
+                 callbacks.append(early_stopping(stopping_rounds=stopping_rounds, verbose=False))
+                 fit_params['callbacks'] = callbacks
+                 # fit_params['verbose'] = -1 # Controlled via callback
+
+            # Add common fit parameters if any (e.g., sample_weight if needed)
+            # if self.use_weights and 'sample_weight' in model_instance.fit.__code__.co_varnames:
+            #      fit_params['sample_weight'] = self.w_train.cpu().numpy() # Pass training weights
+
             model_instance.fit(X_train_np, y_train_np, **fit_params)
             train_time = time.time() - start_time
             self.logger.info(f"{model_name} fitting completed in {train_time:.2f}s")
@@ -1042,11 +1040,18 @@ class ExperimentRunner:
                 y_pred_train = model_instance.predict(X_train_np)
                 # Calculate primary metric (e.g., r2) and loss (mse)
                 if self.primary_metric == 'r2':
-                     from sklearn.metrics import r2_score as sk_r2_score # Avoid name clash
                      val_metric = sk_r2_score(y_val_np, y_pred_val)
                      train_metric = sk_r2_score(y_train_np, y_pred_train)
                      val_loss = mean_squared_error(y_val_np, y_pred_val)
                      train_loss = mean_squared_error(y_train_np, y_pred_train)
+                elif self.primary_metric == 'weighted_r2':
+                    # Note: Cannot directly compute weighted R2 here easily as it requires original tensors
+                    # Calculate standard R2 and MSE as proxies
+                    val_metric = sk_r2_score(y_val_np, y_pred_val)
+                    train_metric = sk_r2_score(y_train_np, y_pred_train)
+                    val_loss = mean_squared_error(y_val_np, y_pred_val)
+                    train_loss = mean_squared_error(y_train_np, y_pred_train)
+                    self.logger.warning("Cannot compute weighted_r2 for GBTs directly, reporting standard r2 instead.")
                 else: # Assume primary metric is mse
                      val_metric = mean_squared_error(y_val_np, y_pred_val)
                      train_metric = mean_squared_error(y_train_np, y_pred_train)
