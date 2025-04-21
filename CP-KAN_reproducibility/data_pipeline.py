@@ -37,12 +37,19 @@ class DataPipeline:
     def load_and_preprocess_data(self) -> tuple[DataFrame, DataFrame, DataFrame, DataFrame, DataFrame, DataFrame]:
         """Load and preprocess data, returning train and validation"""
         lf = pl.scan_parquet(self.config.data_path).fill_null(3)
-
+        # Check if feature_cols is "auto"
+        if self.config.feature_cols == "auto":
+            # Get all column names from the dataset
+            all_columns = lf.columns
+            # Filter out the date_col and weight_col
+            feature_cols = [col for col in all_columns if col not in [self.config.date_col, self.config.weight_col, self.config.target_col]]
+        else:
+            feature_cols = self.config.feature_cols
         query = (lf.select([
             pl.col(self.config.date_col),
             pl.col(self.config.target_col),
             pl.col(self.config.weight_col),
-            *[pl.col(f) for f in self.config.feature_cols]
+            *[pl.col(f) for f in feature_cols]
         ])
         .tail(self.config.n_rows)
         .sort(self.config.date_col))
@@ -57,6 +64,19 @@ class DataPipeline:
 
     def _normalize_features(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         """Normalize features to [-1,1] using RobustScaler"""
+        # --- Debugging ---
+        print("--- Debugging _normalize_features ---")
+        print(f"Config feature_cols type: {type(self.config.feature_cols)}")
+        print(f"Config feature_cols (first 5): {self.config.feature_cols[:5]}")
+        print(f"Config target_col type: {type(self.config.target_col)}")
+        print(f"Config target_col: {self.config.target_col}")
+        try:
+            # Fetching schema might be expensive, but useful for debugging
+            print(f"LazyFrame schema before stats calculation: {lf.schema}")
+        except Exception as e:
+            print(f"Could not fetch LazyFrame schema: {e}")
+        print("--- End Debugging ---")
+
         stats = lf.select([
             *[pl.col(col).quantile(0.05).alias(f"{col}_q05") for col in self.config.feature_cols],
             *[pl.col(col).quantile(0.95).alias(f"{col}_q95") for col in self.config.feature_cols],

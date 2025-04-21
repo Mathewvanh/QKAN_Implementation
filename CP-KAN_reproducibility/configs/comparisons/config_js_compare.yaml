@@ -1,0 +1,73 @@
+# CP-KAN_reproducibility/configs/comparisons/config_js_compare.yaml
+
+experiment_name: "JaneStreet_KAN_Variants_Compare"
+random_seed: 42
+num_epochs: 30 # Moderate epochs for JS
+results_dir: "results/js_compare"
+methods_to_run: 
+  - "LightGBM"
+  - "FixedKAN"
+  - "MLP"
+  - "WaveKAN"
+  - "FourierKAN"
+  # Add other EasyTSF KANs as needed
+
+dataset:
+  name: "jane_street"
+  task_type: "regression"
+  # Use glob pattern with the user's specified path
+  data_path: "~/Interning/Kaggle/jane_street_kaggle/jane-street-real-time-market-data-forecasting/train.parquet/**/*.parquet" # <<< Use user path + glob
+  n_rows: 500000 # Number of rows to use
+  train_ratio: 0.8
+  feature_cols: "auto" # Use the auto-detection logic
+  target_col: "responder_6" 
+  weight_col: "weight" 
+  date_col: "date_id"
+  primary_metric: "weighted_r2" # Use competition metric
+  optimize_sample_size: 50000 # Subset for KAN optimize step
+
+# Grid search parameters, structured by model type
+parameter_grids:
+  FixedKAN: 
+    default:
+      max_degree: [3]
+      hidden_size: [64, 128] # JS has higher input dim (79)
+      learning_rate: [0.001, 0.0005]
+  MLP: 
+    default:
+      mlp_hidden_layers: [[128, 64], [256]] # Larger MLP layers
+      mlp_activation: ['ReLU']
+      learning_rate: [0.001, 0.0005]
+  LightGBM: 
+    default:
+      n_estimators: [100, 500]
+      num_leaves: [31, 61, 127] 
+      learning_rate: [0.05, 0.01]
+      # Add other relevant params like subsample, colsample_bytree
+  WaveKAN:
+     default:
+       wavelet_type: ['mexican_hat', 'morlet']
+       learning_rate: [0.001, 0.0005]
+  FourierKAN:
+     default:
+       fourier_gridsize: [10, 20]
+       learning_rate: [0.001, 0.0005]
+
+# Fixed training settings
+training:
+  batch_size: 4096 # Larger batch size often used for JS
+  optimizer: "AdamW"
+  loss_function: "MSELoss" # Regression loss
+  device: "auto"
+  early_stopping_patience: 5 # For NNs
+  gbt_early_stopping_rounds: 20 # For LGBM
+
+logging:
+  log_dir: "logs/js_compare"
+  project_name: "QKAN_JS_Compare"
+  use_wandb: False
+
+plotting:
+  plot_results: True
+  plot_dir: "results/js_compare/plots"
+  metric_name: "Weighted R2" # Plot competition metric 

@@ -1,0 +1,56 @@
+# config_forestcover.yaml
+
+experiment_name: "ForestCover_KAN_OptComparison"
+random_seed: 42
+num_epochs: 50
+results_dir: "results_forestcover"
+
+dataset:
+  name: "forest_cover" # Name to match in experiment_runner
+  task_type: "classification" # Explicitly set task type
+  validation_split: 0.2
+  num_classes: 7 # Labels are 1-7, mapped to 0-6
+  # input_dim: 54 # Determined automatically by runner
+  # output_dim: 7 # Determined automatically by runner
+  optimize_sample_size: 10000 # Use a subset for KAN optimize step for speed
+  data_path: "./data" # Added for consistency
+  primary_metric: "accuracy" # Added for consistency
+
+model: # Base model info (type)
+  type: "FixedKAN" 
+
+parameter_grid: # Top-level grid search parameters
+  default:
+    # KAN specific parameters
+    max_degree: [5] # Example, adjust as needed
+    hidden_size: [64, 128] # Corrected: List of integers, not list of lists
+    # grid: [5] # Example if you want to grid search grid size
+    # k: [3] # Example if you want to grid search k
+    # Include other FixedKANConfig params if needed in grid
+    
+    # Training parameters
+    learning_rate: [0.001, 0.0005]
+    # optimizer: ["AdamW"] # If you want to grid search optimizer type
+
+training: # Fixed training settings (applied to all grid runs)
+  batch_size: 64
+  # epochs: 50 # Moved num_epochs to top level
+  optimizer: "AdamW" # Default optimizer if not in grid
+  lr_scheduler: "StepLR"
+  lr_scheduler_params:
+    step_size: 10
+    gamma: 0.5
+  loss_function: "CrossEntropyLoss"
+  device: "auto"
+  # seed: 42 # Moved seed to top level
+  early_stopping_patience: 5
+
+logging:
+  log_dir: "logs/forest_cover"
+  project_name: "QKAN_ForestCover"
+  use_wandb: False
+
+plotting:
+  plot_results: True
+  plot_dir: "plots/forest_cover"
+  metric_name: "Accuracy" 

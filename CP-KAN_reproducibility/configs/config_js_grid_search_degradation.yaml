@@ -1,0 +1,54 @@
+# CP-KAN_reproducibility/configs/config_js_grid_search_degradation.yaml
+# Configuration for running grid search and generating degradation study config
+
+experiment_name: JaneStreet_GridSearch_For_Degradation
+experiment_type: grid_search # <<< Run grid search first
+generate_degradation_config: true # <<< Tell runner to generate the next config
+random_seed: 42
+results_dir: ./js_grid_results_degradation # <<< Specify results directory (relative to execution dir)
+
+dataset:
+  name: jane_street
+  # <<< Use glob pattern to select only parquet files >>>
+  data_path: "/Users/darklight/Interning/Kaggle/jane_street_kaggle/jane-street-real-time-market-data-forecasting/train.parquet/**/*.parquet"
+  n_rows: 200000 # Adjust as needed
+  train_ratio: 0.7 # Split for grid search training/validation
+  feature_cols: auto # Use 'auto' or provide specific list
+  target_col: "responder_6" # <<< CHECK THIS
+  weight_col: "weight" # <<< CHECK THIS
+  date_col: "date_id" # <<< CHECK THIS
+  primary_metric: weighted_r2 # Or 'r2' if not using weights
+
+# Define methods and grids for the initial grid search
+methods_to_run: ['FixedKAN', 'MLP']
+kan_optimize_methods: ['GreedyHeuristic'] # Optional: specify KAN opt methods
+
+parameter_grids:
+  FixedKAN:
+    default:
+      hidden_size: [ [32], [64, 32] ] # Example grid - ADJUST
+      max_degree: [3, 4]
+      learning_rate: [1.0e-3, 5.0e-4]
+      trainable_coefficients: [True]
+      # Add other KAN params to search if needed
+  MLP:
+    default:
+      mlp_hidden_layers: [ [64, 32], [128, 64] ] # Example grid - ADJUST
+      mlp_activation: ['ReLU']
+      learning_rate: [1.0e-3, 5.0e-4]
+      # Add other MLP params to search if needed
+
+training: # Parameters for the grid search stage
+  num_epochs: 50   # <<< Shorter epochs for grid search
+  batch_size: 256
+  optimizer: Adam
+
+degradation_study_params: # <<< Parameters for the SECOND run (using the generated config)
+  num_epochs: 500  # <<< Longer epochs for degradation study
+  batch_size: 256  # Can be same or different
+  optimizer: Adam
+  # learning_rate: # Will be taken from the best model found in grid search
+  degradation_patience: 50
+  degradation_threshold_ratio: 0.3
+
+# plotting_config: {} # Optional 

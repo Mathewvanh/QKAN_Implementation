@@ -1,0 +1,47 @@
+# CP-KAN_reproducibility/configs/config_js_grid_search_degradation_short.yaml
+# SHORT Configuration for testing grid search and degradation config generation
+
+experiment_name: JaneStreet_GridSearch_SHORT
+experiment_type: grid_search
+generate_degradation_config: true
+random_seed: 42
+results_dir: ./js_grid_results_degradation_short # Separate results dir
+
+dataset:
+  name: jane_street
+  data_path: "/Users/darklight/Interning/Kaggle/jane_street_kaggle/jane-street-real-time-market-data-forecasting/train.parquet/**/*.parquet"
+  n_rows: 50000 # Reduced rows for speed
+  train_ratio: 0.7
+  feature_cols: auto
+  target_col: "responder_6"
+  weight_col: "weight"
+  date_col: "date_id"
+  primary_metric: weighted_r2
+
+methods_to_run: ['FixedKAN', 'MLP'] # Keep both to test logic
+kan_optimize_methods: ['GreedyHeuristic']
+
+parameter_grids:
+  FixedKAN:
+    default:
+      hidden_size: [ [16] ] # Minimal grid
+      max_degree: [3]
+      learning_rate: [1.0e-3]
+      trainable_coefficients: [True]
+  MLP:
+    default:
+      mlp_hidden_layers: [ [32, 16] ] # Minimal grid
+      mlp_activation: ['ReLU']
+      learning_rate: [1.0e-3]
+
+training:
+  num_epochs: 2 # Minimal epochs
+  batch_size: 512 # Larger batch size might speed up epochs slightly
+  optimizer: Adam
+
+degradation_study_params:
+  num_epochs: 5 # Short degradation epochs for testing
+  batch_size: 512
+  optimizer: Adam
+  degradation_patience: 3
+  degradation_threshold_ratio: 0.5 

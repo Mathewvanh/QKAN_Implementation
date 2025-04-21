@@ -435,91 +435,222 @@ class ExperimentRunner:
 
     # --- Training & Evaluation --- 
     def _train_and_evaluate(self, model: nn.Module, optimizer: torch.optim.Optimizer,
-                          opt_method: str, config: Dict[str, Any], num_epochs: int
-                          ) -> Tuple[Dict[str, List], float]:
-        """Trains and evaluates a model, appending results to self.results_df."""
+                          opt_method: str, config: Dict[str, Any], num_epochs: int,
+                          # --- New parameters for degradation tracking ---
+                          track_degradation: bool = False,
+                          degradation_patience: int = 50,
+                          degradation_threshold_ratio: float = 0.3
+                          ) -> Tuple[Dict[str, List], float, Optional[int]]: # Return best metric, peak epoch
+        """Trains and evaluates a model, optionally tracking degradation metrics.
+
+        Args:
+            model: The model to train.
+            optimizer: The optimizer.
+            opt_method: String identifier for the optimization method/run type.
+            config: Dictionary containing hyperparameters for this run.
+            num_epochs: Total epochs to train.
+            track_degradation: If True, track grad norm, weight change, degradation.
+            degradation_patience: Epochs to wait after peak before stopping due to degradation.
+            degradation_threshold_ratio: Stop if val metric drops below peak * threshold_ratio.
+
+        Returns:
+            Tuple: (metrics_dict, best_primary_metric_val, peak_epoch)
+        """
         model.to(self.device); metrics = defaultdict(list)
         criterion = nn.CrossEntropyLoss() if self.task_type == 'classification' else nn.MSELoss()
         if self.dataset_name.lower() == 'jane_street' and self.use_weights:
+             # --- Use weighted MSE Loss for Jane Street ---
              criterion = lambda y_pred, y_true, w: torch.sum(w * (y_true.squeeze() - y_pred.squeeze())**2) / (torch.sum(w) + 1e-12)
+             
         best_primary_metric_val = float('-inf') if self.higher_is_better else float('inf')
-        
+        peak_epoch: Optional[int] = None
+        epochs_since_peak = 0
+        prev_weights = {name: param.clone().detach().cpu() for name, param in model.named_parameters() if param.requires_grad} if track_degradation else {}
+
         # Extract identifiers from the passed config
         model_type = config.get('model_type', 'Unknown')
         kan_opt_method = config.get('kan_opt_method') # Will be None for MLP
         param_count = config.get('param_count', np.nan)
         kan_opt_time = config.get('kan_opt_time', np.nan)
-        # Get the core hyperparameter config (without the identifiers we just extracted)
         core_config = {k: v for k, v in config.items() if k not in ['model_type', 'kan_opt_method', 'param_count', 'kan_opt_time']}
 
         pbar = trange(num_epochs, desc=f"Training {opt_method}", leave=False)
+        stopped_early = False
         for epoch in pbar:
-            model.train(); optimizer.zero_grad(); output = model(self.x_train)
-            loss_args = [output, self.y_train, self.w_train] if self.dataset_name.lower() == 'jane_street' and self.use_weights else [output, self.y_train]
-            loss = criterion(*loss_args); loss.backward(); optimizer.step()
+            model.train()
+            epoch_loss = 0.0
+            epoch_grad_norm = 0.0
+            epoch_weight_change = 0.0
+            batch_size = config.get('batch_size', self.config.get('training',{}).get('batch_size', 64)) # Get batch size
+            n_batches = math.ceil(len(self.x_train) / batch_size)
+            permutation = torch.randperm(self.x_train.size(0))
+
+            for i in range(n_batches):
+                indices = permutation[i * batch_size:(i + 1) * batch_size]
+                x_batch, y_batch = self.x_train[indices], self.y_train[indices]
+                w_batch = self.w_train[indices] if self.use_weights else None
+
+                optimizer.zero_grad()
+                output = model(x_batch)
+                
+                loss_args = [output, y_batch, w_batch] if self.dataset_name.lower() == 'jane_street' and self.use_weights else [output, y_batch]
+                loss = criterion(*loss_args)
+
+                if torch.isnan(loss) or torch.isinf(loss):
+                    self.logger.error(f"NaN/Inf loss detected at epoch {epoch}, batch {i}. Stopping training.")
+                    stopped_early = True; break # Stop batch loop and epoch loop
+                    
+                loss.backward()
+
+                # --- Degradation Tracking: Grad Norm (before step) ---
+                batch_grad_norm = 0.0
+                if track_degradation:
+                    for p in model.parameters():
+                         if p.grad is not None:
+                             param_norm = p.grad.detach().data.norm(2)
+                             batch_grad_norm += param_norm.item() ** 2
+                    epoch_grad_norm += (batch_grad_norm ** 0.5) # Sum of norms of batches
+
+                optimizer.step()
+                epoch_loss += loss.item() * len(x_batch) # Accumulate loss weighted by batch size
+                
+            if stopped_early: break # Exit epoch loop if loss was NaN/Inf
+            
+            avg_epoch_loss = epoch_loss / len(self.x_train)
+            avg_epoch_grad_norm = epoch_grad_norm / n_batches if track_degradation else np.nan
+            
+            # --- Degradation Tracking: Weight Change (after step) ---
+            current_weight_change = 0.0
+            if track_degradation:
+                 with torch.no_grad():
+                      for name, param in model.named_parameters():
+                          if param.requires_grad and name in prev_weights:
+                               weight_diff = param.data - prev_weights[name].to(self.device)
+                               current_weight_change += torch.norm(weight_diff).item()
+                               prev_weights[name] = param.clone().detach().cpu()
+            epoch_weight_change = current_weight_change if track_degradation else np.nan
             
             model.eval(); epoch_metrics = {}
             with torch.no_grad():
-                # --- Calculate Train Metrics --- #
-                train_output = model(self.x_train); 
-                epoch_metrics['train_loss'] = loss.item() # Use calculated train loss
-                # --- Calculate Validation Metrics --- #
+                # Use full dataset for Eval (can be slow, consider batching if needed)
+                train_output = model(self.x_train)
+                epoch_metrics['train_loss'] = avg_epoch_loss # Use calculated average epoch loss
                 val_output = model(self.x_val)
                 val_loss_args = [val_output, self.y_val, self.w_val] if self.dataset_name.lower() == 'jane_street' and self.use_weights else [val_output, self.y_val]
                 epoch_metrics['val_loss'] = criterion(*val_loss_args).item()
-                
-                # --- Task-Specific Metrics --- #
+
                 if self.task_type == 'regression':
-                    epoch_metrics['train_mse'] = epoch_metrics['train_loss'] # Approx
+                    # Use calculated train loss if MSE, otherwise recalc might be needed
+                    epoch_metrics['train_mse'] = epoch_metrics['train_loss'] 
                     epoch_metrics['val_mse'] = epoch_metrics['val_loss']
                     epoch_metrics['train_r2'] = weighted_r2(self.y_train, train_output, self.w_train) if 'jane_street' in self.dataset_name.lower() and self.use_weights else r2_score(self.y_train, train_output)
                     epoch_metrics['val_r2'] = weighted_r2(self.y_val, val_output, self.w_val) if 'jane_street' in self.dataset_name.lower() and self.use_weights else r2_score(self.y_val, val_output)
                 else: # Classification
                     epoch_metrics['train_accuracy'] = accuracy(self.y_train, train_output)
                     epoch_metrics['val_accuracy'] = accuracy(self.y_val, val_output)
-                
+
                 # --- Determine Primary Metric for Logging/Comparison --- #
                 current_primary_val_metric_key = f'val_{self.primary_metric}'
                 current_primary_metric = epoch_metrics.get(current_primary_val_metric_key)
+                temp_higher_is_better = self.higher_is_better
                 if current_primary_metric is None:
-                     self.logger.error(f"Primary metric '{current_primary_val_metric_key}' not found in calculated metrics! Using val_loss.")
+                     self.logger.error(f"Primary metric '{current_primary_val_metric_key}' not found! Using val_loss.")
                      current_primary_metric = epoch_metrics['val_loss']; temp_higher_is_better = False
-                else: temp_higher_is_better = self.higher_is_better
 
             pbar.set_postfix({f"val_{self.primary_metric}": f"{current_primary_metric:.4f}"}) # Update progress bar
-            # Check if current epoch metric is the best seen so far
-            is_better = (current_primary_metric > best_primary_metric_val) if temp_higher_is_better else (current_primary_metric < best_primary_metric_val)
-            if is_better: best_primary_metric_val = current_primary_metric
             
-            # Store metrics for this epoch (for potential internal use or history return)
-            metrics['epoch'].append(epoch)
-            for k, v in epoch_metrics.items(): metrics[k].append(v)
-            
+            # --- Degradation Tracking: Check vs Peak & Early Stopping --- #
+            current_degradation_val = np.nan
+            if track_degradation and pd.notna(current_primary_metric):
+                is_better = (current_primary_metric > best_primary_metric_val) if temp_higher_is_better else (current_primary_metric < best_primary_metric_val)
+                if is_better:
+                    best_primary_metric_val = current_primary_metric
+                    peak_epoch = epoch
+                    epochs_since_peak = 0
+                    # Optionally save best model checkpoint here if tracking degradation
+                else:
+                    epochs_since_peak += 1
+                
+                if peak_epoch is not None and epoch > peak_epoch: # Calculate degradation after peak
+                    current_degradation_val = abs(best_primary_metric_val - current_primary_metric) # Absolute difference
+                
+                # Degradation-based Early Stopping Check
+                if peak_epoch is not None and epochs_since_peak >= degradation_patience:
+                    threshold = abs(best_primary_metric_val * degradation_threshold_ratio)
+                    # Stop if metric is WORSE than peak by more than threshold * peak
+                    stop = False
+                    if temp_higher_is_better:
+                        stop = current_primary_metric < (best_primary_metric_val - threshold) # Degraded too much
+                    else: # lower is better
+                        stop = current_primary_metric > (best_primary_metric_val + threshold) # Increased too much
+                        
+                    if stop:
+                         self.logger.warning(f"DEGRADATION EARLY STOPPING for {opt_method} at epoch {epoch}. "
+                                             f"Metric ({current_primary_metric:.4f}) degraded beyond threshold ({threshold:.4f}) of peak ({best_primary_metric_val:.4f}) "
+                                             f"after {epochs_since_peak} epochs.")
+                         stopped_early = True
+                         # Don't break yet, finish logging this epoch
+            elif pd.notna(current_primary_metric): # Standard best metric tracking if not tracking degradation
+                 is_better = (current_primary_metric > best_primary_metric_val) if temp_higher_is_better else (current_primary_metric < best_primary_metric_val)
+                 if is_better: best_primary_metric_val = current_primary_metric; peak_epoch = epoch
+                 
             # --- Append results for this epoch to the main DataFrame --- #
             row_data = {
-                 'model_type': model_type,                  # Added
-                 'kan_opt_method': kan_opt_method,        # Added (can be None)
-                 'config': str(core_config),             # Store core hyperparams
-                 'param_count': param_count,             # Added
-                 'kan_opt_time': kan_opt_time,          # Added (can be NaN)
-                 'epoch': epoch,
-                 **epoch_metrics                        # Add all calculated metrics for this epoch
+                 'model_type': model_type, 'kan_opt_method': kan_opt_method,
+                 'config': str(core_config), 'param_count': param_count, 'kan_opt_time': kan_opt_time,
+                 'epoch': epoch, **epoch_metrics,
+                 # Add degradation metrics if tracked
+                 'grad_norm': avg_epoch_grad_norm, 'weight_change': epoch_weight_change,
+                 'degradation_from_peak': current_degradation_val,
+                 'kan_optimized_model_path': config.get('kan_optimized_model_path') # Get model path from config
             }
-            new_row = pd.DataFrame([row_data]) # Needs to be list of dicts or dict of lists
-            
-            # Use pd.concat for robust appending, handles new columns
-            if self.results_df.empty:
-                 self.results_df = new_row
-            else:
-                 self.results_df = pd.concat([self.results_df, new_row], ignore_index=True)
+            # Ensure all expected columns exist before appending
+            for col in ['grad_norm', 'weight_change', 'degradation_from_peak', 'kan_optimized_model_path']:
+                 if col not in self.results_df.columns: self.results_df[col] = pd.NA
+                 
+            new_row = pd.DataFrame([row_data])
+            # Align columns before concat
+            shared_cols = self.results_df.columns.intersection(new_row.columns)
+            missing_in_df = new_row.columns.difference(self.results_df.columns)
+            missing_in_row = self.results_df.columns.difference(new_row.columns)
+            for col in missing_in_df: self.results_df[col] = pd.NA
+            for col in missing_in_row: new_row[col] = pd.NA
+            self.results_df = pd.concat([self.results_df.reindex(columns=new_row.columns, fill_value=pd.NA),
+                                            new_row], ignore_index=True)
 
-            # Optional: Log progress periodically
             if epoch % 20 == 0:
                  log_msg = f"[{opt_method}] Cfg={core_config} Ep {epoch}/{num_epochs}, Loss(tr/v)={epoch_metrics['train_loss']:.4f}/{epoch_metrics['val_loss']:.4f}, Val {self.primary_metric.upper()}={current_primary_metric:.4f}"
                  self.logger.info(log_msg)
+                 
+            if stopped_early: break # Exit epoch loop now if early stopping triggered
         # End of epoch loop
         pbar.close()
-        return metrics, best_primary_metric_val # Return epoch metrics history and best val score
+        
+        # Handle filling remaining epochs if stopped early
+        if stopped_early and epoch < num_epochs - 1:
+             last_row = self.results_df.iloc[-1].copy()
+             fill_row = last_row # Initialize fill_row with the last valid data
+             for fill_epoch in range(epoch + 1, num_epochs):
+                  fill_row['epoch'] = fill_epoch
+                  # Add other metrics from last valid epoch if needed, or keep as NaN/last value
+                  fill_row['train_loss'] = np.nan # Mark as not computed
+                  fill_row['val_loss'] = np.nan
+                  fill_row[f'train_{self.primary_metric}'] = np.nan
+                  fill_row[f'val_{self.primary_metric}'] = np.nan
+                  fill_row['grad_norm'] = np.nan
+                  fill_row['weight_change'] = np.nan
+                  fill_row['degradation_from_peak'] = np.nan
+                  fill_row['kan_optimized_model_path'] = np.nan
+                  new_row = pd.DataFrame([fill_row])
+                  # Align columns again
+                  shared_cols = self.results_df.columns.intersection(new_row.columns)
+                  missing_in_df = new_row.columns.difference(self.results_df.columns)
+                  missing_in_row = self.results_df.columns.difference(new_row.columns)
+                  for col in missing_in_df: self.results_df[col] = pd.NA
+                  for col in missing_in_row: new_row[col] = pd.NA
+                  self.results_df = pd.concat([self.results_df.reindex(columns=new_row.columns, fill_value=pd.NA), new_row], ignore_index=True)
+                  
+        return metrics, best_primary_metric_val, peak_epoch # Return epoch metrics history, best val score, and peak epoch
 
     # --- Grid Search ---
     def run_grid_search(self, num_epochs: Optional[int] = None):
@@ -707,19 +838,55 @@ class ExperimentRunner:
                             optimizer_for_train = optimizer 
                             kan_opt_time = 0.0
                             kan_opt_start_time = time.time()
+                            optimized_state_path = None # Initialize path variable
                             try:
+                                # We assume optimize methods modify the model in-place
                                 kan_optimize_fn(model_for_opt, self.x_optimize, self.y_optimize_onehot, model_config_obj)
                                 kan_opt_time = time.time() - kan_opt_start_time
                                 self.logger.info(f"KAN Optimize ({kan_opt_method_name}) done: {kan_opt_time:.2f}s")
-                                current_run_config = {**current_params, 'kan_opt_method': kan_opt_method_name, 'kan_opt_time': kan_opt_time, 'param_count': p_count, 'model_type': method_name}
-                                _, _ = self._train_and_evaluate(model_for_opt, optimizer_for_train, f"KAN-{kan_opt_method_name}", current_run_config, num_epochs)
+                                
+                                # --- Save Optimized KAN Model Object ---
+                                state_save_dir = os.path.join(self.results_dir, "optimized_kan_models") # Changed folder name
+                                os.makedirs(state_save_dir, exist_ok=True)
+                                # Create a unique filename (e.g., based on hash of config + opt method)
+                                import hashlib
+                                config_hash = hashlib.md5(str(current_params).encode()).hexdigest()[:8]
+                                model_filename = f"kan_{config_hash}_{kan_opt_method_name}_model.pth" # Changed extension/name
+                                optimized_model_path = os.path.join(state_save_dir, model_filename)
+                                try:
+                                     # Save the entire model object, not just state_dict
+                                     torch.save(model_for_opt, optimized_model_path) 
+                                     self.logger.debug(f"Saved optimized KAN model object to: {optimized_model_path}")
+                                except Exception as save_e:
+                                     self.logger.error(f"Failed to save optimized KAN model object: {save_e}")
+                                     optimized_model_path = None # Ensure path is None if saving failed
+                                     
+                                # --- Prepare config for training run ---
+                                current_run_config = {
+                                    **current_params, 
+                                    'model_type': method_name,
+                                    'kan_opt_method': kan_opt_method_name, 
+                                    'kan_opt_time': kan_opt_time, 
+                                    'param_count': p_count, 
+                                    # Use a distinct key for the model path
+                                    'kan_optimized_model_path': optimized_model_path 
+                                }
+                                # Unpack 3 values now
+                                _, _, _ = self._train_and_evaluate(
+                                    model=model_for_opt, 
+                                    optimizer=optimizer_for_train, 
+                                    opt_method=f"KAN-{kan_opt_method_name}", 
+                                    config=current_run_config, 
+                                    num_epochs=num_epochs
+                                )
                             except ImportError as ie:
                                 self.logger.warning(f"Skipping KAN Optimize {kan_opt_method_name}: {ie}")
                             except Exception as e:
                                 self.logger.error(f"Error KAN Optimize {kan_opt_method_name}: {e}", exc_info=False)
                     else: # Other NNs (MLP, WaveKAN, etc.)
                         current_run_config = {**current_params, 'param_count': p_count, 'model_type': method_name, 'kan_opt_method': 'N/A', 'kan_opt_time': 0.0}
-                        _, _ = self._train_and_evaluate(model, optimizer, method_name, current_run_config, num_epochs)
+                        # Unpack 3 values now
+                        _, _, _ = self._train_and_evaluate(model, optimizer, method_name, current_run_config, num_epochs)
                     del model, optimizer 
 
                 elif method_name == 'LightGBM': # Only LightGBM remains here
@@ -751,6 +918,244 @@ class ExperimentRunner:
                  self.logger.warning("No results were generated to save.")
         except Exception as e:
             self.logger.error(f"Failed to save results CSV: {e}")
+
+        # --- Generate Degradation Config (if requested) ---
+        if self.config.get('generate_degradation_config', False) and not self.results_df.empty:
+            self._generate_degradation_config()
+
+    def _generate_degradation_config(self):
+        """Finds best KAN/MLP configs and generates a degradation study config file."""
+        self.logger.info("Attempting to generate degradation study config file...")
+        
+        results_df = self.results_df.copy()
+        results_df.dropna(subset=[f'val_{self.primary_metric}'], inplace=True) # Only consider runs with valid final metric
+        if results_df.empty:
+            self.logger.warning("No valid results found in DataFrame to determine best models for degradation config.")
+            return
+
+        best_kan_run = None
+        best_mlp_run = None
+
+        # Find the best overall run for each model type (KAN variations and MLP)
+        idx_best = results_df.loc[results_df.groupby('model_type')[f'val_{self.primary_metric}'].idxmax()] if self.higher_is_better else results_df.loc[results_df.groupby('model_type')[f'val_{self.primary_metric}'].idxmin()]
+        
+        # Specifically find KAN (any opt method) and MLP
+        kan_types = ['FixedKAN'] # Add other KAN types if needed
+        best_kan_row = idx_best[idx_best['model_type'].isin(kan_types)]
+        best_mlp_row = idx_best[idx_best['model_type'] == 'MLP']
+
+        if best_kan_row.empty:
+            self.logger.warning("Could not find a best KAN run from the results.")
+        else:
+            # If multiple KAN opt methods ran, pick the overall best KAN
+            best_kan_idx = best_kan_row[f'val_{self.primary_metric}'].idxmax() if self.higher_is_better else best_kan_row[f'val_{self.primary_metric}'].idxmin()
+            best_kan_run = best_kan_row.loc[best_kan_idx]
+            self.logger.info(f"Best KAN configuration found: {best_kan_run['config']} (Val {self.primary_metric}: {best_kan_run[f'val_{self.primary_metric}']:.4f})")
+
+        # Check the DataFrame slice returned by the lookup FIRST
+        if best_mlp_row.empty:
+            self.logger.warning("Could not find a best MLP run from the results.")
+            # Explicitly set best_mlp_run to None if not found
+            best_mlp_run = None 
+        else:
+            # Assign only if the row was found
+            best_mlp_run = best_mlp_row.iloc[0] 
+            self.logger.info(f"Best MLP configuration found: {best_mlp_run['config']} (Val {self.primary_metric}: {best_mlp_run[f'val_{self.primary_metric}']:.4f})")
+
+        # Check if at least one model was found before proceeding
+        if best_kan_run is None and best_mlp_run is None:
+            self.logger.error("Failed to find best configurations for either KAN or MLP. Cannot generate degradation config.")
+            return
+
+        # --- Construct the new config dictionary --- #
+        degradation_config = {
+            'experiment_name': f"{self.config.get('experiment_name', 'Experiment')}_DegradationStudy",
+            'experiment_type': 'degradation_study',
+            'random_seed': self.config.get('random_seed', 42),
+            'results_dir': os.path.join(self.results_dir, 'degradation_study_results'), # Subdirectory
+            'dataset': self.dataset_config, # Reuse original dataset config
+            'degradation_models': [],
+            # Get degradation-specific training params from original config
+            'training': self.config.get('degradation_study_params', 
+                                        self.config.get('training', {})), # Fallback to original training params
+        }
+        # Add degradation tracking flags to training config
+        degradation_config['training']['track_degradation_metrics'] = True
+
+        # Add best models found
+        if best_kan_run is not None:
+            try:
+                 # Convert the string representation back to a dict
+                 kan_core_config = eval(best_kan_run['config'])
+                 kan_config_for_study = {
+                     'model_type': best_kan_run['model_type'],
+                     'kan_opt_method': best_kan_run.get('kan_opt_method', 'N/A'),
+                     # Use the correct key for model path
+                     'kan_optimized_model_path': best_kan_run.get('kan_optimized_model_path'), 
+                     **kan_core_config
+                 }
+                 # Ensure model path is valid before adding
+                 model_path = kan_config_for_study.get('kan_optimized_model_path')
+                 if model_path and os.path.exists(model_path):
+                     degradation_config['degradation_models'].append(kan_config_for_study)
+                 else:
+                     self.logger.warning(f"Optimized KAN model path was invalid or missing ({model_path}). KAN will not be included in degradation study config.")
+            except Exception as e:
+                 self.logger.error(f"Error processing best KAN run config: {best_kan_run['config']}. Error: {e}")
+
+        if best_mlp_run is not None:
+            try:
+                 mlp_core_config = eval(best_mlp_run['config'])
+                 mlp_config_for_study = {
+                     'model_type': best_mlp_run['model_type'],
+                     **mlp_core_config
+                 }
+                 degradation_config['degradation_models'].append(mlp_config_for_study)
+            except Exception as e:
+                 self.logger.error(f"Error parsing MLP config string: {best_mlp_run['config']}. Error: {e}")
+
+        # --- Save the new config as YAML --- #
+        output_path = os.path.join(self.results_dir, 'config_degradation_study_generated.yaml')
+        try:
+            import yaml
+            with open(output_path, 'w') as f:
+                yaml.dump(degradation_config, f, default_flow_style=False, sort_keys=False)
+            self.logger.info(f"Degradation study configuration saved to: {output_path}")
+        except ImportError:
+            self.logger.error("PyYAML library not found. Cannot save degradation config YAML.")
+        except Exception as e:
+            self.logger.error(f"Error saving degradation config YAML: {e}")
+
+    def run_degradation_study(self):
+        """Runs the degradation analysis using specific model configs from the config file."""
+        self.logger.info("\n=== Starting Degradation Study ===")
+        
+        # Get model configurations to run for the study
+        models_to_run = self.config.get('degradation_models')
+        if not models_to_run:
+            self.logger.error("No models specified under 'degradation_models' in the config. Cannot run study.")
+            return
+            
+        # Get training parameters for the degradation study
+        training_params = self.config.get('training', {})
+        num_epochs = training_params.get('num_epochs', 200) # Use possibly extended epochs
+        batch_size = training_params.get('batch_size', 64) # Use batch size from config
+        track_degradation = training_params.get('track_degradation_metrics', True) # Should be True
+        degradation_patience = training_params.get('degradation_patience', 50)
+        degradation_threshold = training_params.get('degradation_threshold_ratio', 0.3)
+
+        # Ensure results_df is clean for this specific study run
+        self.results_df = pd.DataFrame()
+
+        for model_config in models_to_run:
+            model_type = model_config.get('model_type')
+            core_params = {k: v for k, v in model_config.items() if k not in ['model_type', 'kan_opt_method']} # Exclude identifiers
+            self.logger.info(f"\n--- Running Degradation Study for: {model_type} --- Configuruation {core_params}")
+            
+            model: Optional[nn.Module] = None
+            model_config_obj = None
+            p_count = np.nan
+            kan_opt_time = np.nan # No KAN optimize step during degradation run
+            kan_opt_method = model_config.get('kan_opt_method', 'N/A') # Get original opt method if KAN
+            
+            # --- Initialize Model --- 
+            try:
+                if model_type == 'FixedKAN':
+                    # --- Load the entire optimized model object --- 
+                    model_path = model_config.get('kan_optimized_model_path')
+                    if model_path and os.path.exists(model_path):
+                        try:
+                            model = torch.load(model_path, map_location=self.device)
+                            model.to(self.device) # Ensure model is on the correct device after loading
+                            self.logger.info(f"Successfully loaded optimized KAN model object from {model_path}")
+                            # Re-count parameters after loading the specific model
+                            p_count = count_parameters(model)
+                        except Exception as load_e:
+                            self.logger.error(f"Failed to load optimized KAN model object from {model_path}: {load_e}. Skipping KAN.")
+                            continue # Skip this KAN model if loading failed
+                    else:
+                         self.logger.error(f"Optimized KAN model path not found or invalid ({model_path}). Skipping KAN.")
+                         continue # Skip this KAN model if path is invalid
+
+                    # No need to initialize from config if loading full model
+                    # model_config_obj = FixedKANConfig(**kan_specific_params)
+                    # model = FixedKAN(model_config_obj).to(self.device)
+                    
+                elif model_type == 'MLP':
+                    hidden_layers = core_params.get('mlp_hidden_layers', [64, 64]) 
+                    activation = core_params.get('mlp_activation', 'ReLU') 
+                    mlp_full_layers = [self.input_dim] + hidden_layers + [self.output_dim]
+                    model = self._create_mlp(mlp_full_layers, activation).to(self.device)
+                    if model: p_count = count_parameters(model)
+                    self.logger.debug(f"Initialized MLP (Degradation) layers: {mlp_full_layers}")
+                # Add other model types if needed, copying initialization logic
+                else:
+                     self.logger.warning(f"Unsupported model type '{model_type}' for degradation study run. Skipping.")
+                     continue
+                     
+            except Exception as e:
+                 self.logger.error(f"Error initializing {model_type} for degradation study: {e}", exc_info=True)
+                 continue
+                 
+            if model is None: continue # Skip if initialization failed
+            
+            # --- Optimizer --- 
+            lr = core_params.get('learning_rate', training_params.get('learning_rate', 1e-3))
+            optimizer_name = core_params.get('optimizer', training_params.get('optimizer', 'Adam'))
+            try:
+                optimizer_cls = getattr(torch.optim, optimizer_name)
+                optimizer = optimizer_cls(model.parameters(), lr=lr)
+            except AttributeError:
+                self.logger.error(f"Optimizer '{optimizer_name}' not found. Skipping {model_type}.")
+                del model; torch.cuda.empty_cache(); gc.collect()
+                continue
+                
+            # --- Train & Evaluate with Degradation Tracking --- 
+            current_run_config = { 
+                 **core_params, # Include original core hyperparams
+                 'model_type': model_type,
+                 'kan_opt_method': kan_opt_method,
+                 'param_count': p_count,
+                 'kan_opt_time': kan_opt_time, # Should be NaN or 0 for degradation run
+                 'batch_size': batch_size # Pass batch_size for training loop
+            }
+            
+            try:
+                self._train_and_evaluate(
+                    model=model, 
+                    optimizer=optimizer, 
+                    opt_method=f"{model_type}-Degradation", 
+                    config=current_run_config, 
+                    num_epochs=num_epochs,
+                    track_degradation=track_degradation,
+                    degradation_patience=degradation_patience,
+                    degradation_threshold_ratio=degradation_threshold
+                )
+            except Exception as e:
+                 self.logger.exception(f"Error during degradation training for {model_type}: {e}")
+            finally:
+                 del model, optimizer; torch.cuda.empty_cache(); gc.collect()
+
+        # --- Save Final Results for Degradation Study --- 
+        results_path = os.path.join(self.config['results_dir'], f'degradation_study_{self.dataset_name}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+        try:
+            if not self.results_df.empty:
+                 # Use same reordering logic as grid search saving
+                 core_cols = ['model_type', 'kan_opt_method', f'val_{self.primary_metric}', 'train_{self.primary_metric}', 
+                              'val_loss', 'train_loss', 'param_count', 'kan_opt_time', 'epoch',
+                              'grad_norm', 'weight_change', 'degradation_from_peak', 'kan_optimized_model_path'] # Include degradation cols
+                 existing_core_cols = [c for c in core_cols if c in self.results_df.columns]
+                 param_cols = sorted([k for k in self.results_df.columns if k not in existing_core_cols])
+                 final_cols = existing_core_cols + param_cols
+                 self.results_df = self.results_df[final_cols].round(6)
+                 self.results_df.to_csv(results_path, index=False)
+                 self.logger.info(f"Degradation study results saved: {results_path}")
+                 # Optionally call plotting function here
+                 # self.plot_degradation_results() # A new plotting function?
+            else:
+                 self.logger.warning("No results generated during degradation study to save.")
+        except Exception as e:
+            self.logger.error(f"Failed to save degradation study results CSV: {e}")
 
     def _create_mlp(self, layers: List[int], activation: str) -> nn.Sequential:
         """Helper to create a simple MLP.
@@ -972,51 +1377,69 @@ class ExperimentRunner:
             y_train_np = self.y_train.cpu().numpy()
             X_val_np = self.x_val.cpu().numpy()
             y_val_np = self.y_val.cpu().numpy()
+            # Also convert weights if they exist and are tensors
+            w_train_np = self.w_train.cpu().numpy() if hasattr(self, 'w_train') and isinstance(self.w_train, torch.Tensor) else None
+            w_val_np = self.w_val.cpu().numpy() if hasattr(self, 'w_val') and isinstance(self.w_val, torch.Tensor) else None
         else: # Assuming already NumPy
             X_train_np = self.x_train
             y_train_np = self.y_train
             X_val_np = self.x_val
             y_val_np = self.y_val
+            w_train_np = self.w_train if hasattr(self, 'w_train') else None # Assume numpy if exists
+            w_val_np = self.w_val if hasattr(self, 'w_val') else None
             
         # Squeeze target if necessary (e.g., if it's [N, 1])
         if y_train_np.ndim > 1 and y_train_np.shape[1] == 1:
              y_train_np = y_train_np.squeeze()
         if y_val_np.ndim > 1 and y_val_np.shape[1] == 1:
              y_val_np = y_val_np.squeeze()
+        # Squeeze weights if necessary
+        if w_train_np is not None and w_train_np.ndim > 1:
+            w_train_np = w_train_np.squeeze()
+        if w_val_np is not None and w_val_np.ndim > 1:
+            w_val_np = w_val_np.squeeze()
 
         try:
             # Set model parameters before fitting
-            # GBT models often take params in __init__, but set_params works too
             model_instance.set_params(**params)
             
             # Fit the model
-            # Add early stopping if possible? Requires eval_set
             fit_params = {}
-            callbacks = [] # Initialize callbacks list
+            callbacks = [] 
+            eval_set = [(X_val_np, y_val_np)]
+            
+            # Prepare eval_set with weights if applicable and model supports it
+            # Note: Check specific model docs if weight support in eval_set varies
+            # For LGBM/XGBM, sample_weight in fit is usually separate from eval_set weights
+            
             if isinstance(model_instance, (xgb.XGBClassifier, xgb.XGBRegressor)):
-                 fit_params['eval_set'] = [(X_val_np, y_val_np)]
+                 fit_params['eval_set'] = eval_set
                  fit_params['early_stopping_rounds'] = self.config.get('training',{}).get('gbt_early_stopping_rounds', 10)
-                 # fit_params['verbose'] = False # XGBoost uses early_stopping_rounds
             elif isinstance(model_instance, (lgb.LGBMClassifier, lgb.LGBMRegressor)):
-                 fit_params['eval_set'] = [(X_val_np, y_val_np)]
-                 # Use LightGBM callbacks for early stopping
+                 fit_params['eval_set'] = eval_set
                  stopping_rounds = self.config.get('training',{}).get('gbt_early_stopping_rounds', 10)
                  callbacks.append(early_stopping(stopping_rounds=stopping_rounds, verbose=False))
                  fit_params['callbacks'] = callbacks
-                 # fit_params['verbose'] = -1 # Controlled via callback
 
-            # Add common fit parameters if any (e.g., sample_weight if needed)
-            # if self.use_weights and 'sample_weight' in model_instance.fit.__code__.co_varnames:
-            #      fit_params['sample_weight'] = self.w_train.cpu().numpy() # Pass training weights
-
+            # Add sample weights to fit method if available and model accepts it
+            if self.use_weights and w_train_np is not None and hasattr(model_instance, 'fit'):
+                # Inspect fit signature to check for sample_weight argument
+                import inspect
+                fit_sig = inspect.signature(model_instance.fit)
+                if 'sample_weight' in fit_sig.parameters:
+                    fit_params['sample_weight'] = w_train_np
+                    self.logger.debug(f"Passing sample_weight to {model_name}.fit()")
+                else:
+                    self.logger.warning(f"Model {model_name} does not accept 'sample_weight' in fit method. Weights not used for training.")
+            
             model_instance.fit(X_train_np, y_train_np, **fit_params)
             train_time = time.time() - start_time
             self.logger.info(f"{model_name} fitting completed in {train_time:.2f}s")
 
             # Evaluate
             val_metric = None
-            train_metric = None # Optional: calculate train metric too
-            val_loss = np.nan # Loss not directly comparable
+            train_metric = None
+            val_loss = np.nan 
             train_loss = np.nan
 
             if self.task_type == 'classification':
@@ -1024,11 +1447,9 @@ class ExperimentRunner:
                 y_pred_train = model_instance.predict(X_train_np)
                 val_metric = accuracy_score(y_val_np, y_pred_val)
                 train_metric = accuracy_score(y_train_np, y_pred_train)
-                # Try to get logloss if possible (requires predict_proba)
                 try:
                     y_prob_val = model_instance.predict_proba(X_val_np)
                     y_prob_train = model_instance.predict_proba(X_train_np)
-                    # Use scikit-learn log_loss
                     from sklearn.metrics import log_loss
                     val_loss = log_loss(y_val_np, y_prob_val)
                     train_loss = log_loss(y_train_np, y_prob_train)
@@ -1038,20 +1459,25 @@ class ExperimentRunner:
             else: # Regression
                 y_pred_val = model_instance.predict(X_val_np)
                 y_pred_train = model_instance.predict(X_train_np)
-                # Calculate primary metric (e.g., r2) and loss (mse)
-                if self.primary_metric == 'r2':
-                     val_metric = sk_r2_score(y_val_np, y_pred_val)
-                     train_metric = sk_r2_score(y_train_np, y_pred_train)
+                
+                # Calculate metrics, using weights if primary metric requires it
+                if self.primary_metric == 'weighted_r2':
+                     if w_val_np is not None and w_train_np is not None:
+                         val_metric = sk_r2_score(y_val_np, y_pred_val, sample_weight=w_val_np)
+                         train_metric = sk_r2_score(y_train_np, y_pred_train, sample_weight=w_train_np)
+                         self.logger.info(f"Calculated weighted_r2 for {model_name}.")
+                     else:
+                         self.logger.warning(f"Weights not available for weighted_r2 calculation for {model_name}. Calculating standard r2 instead.")
+                         val_metric = sk_r2_score(y_val_np, y_pred_val)
+                         train_metric = sk_r2_score(y_train_np, y_pred_train)
+                     # MSE is unweighted
                      val_loss = mean_squared_error(y_val_np, y_pred_val)
                      train_loss = mean_squared_error(y_train_np, y_pred_train)
-                elif self.primary_metric == 'weighted_r2':
-                    # Note: Cannot directly compute weighted R2 here easily as it requires original tensors
-                    # Calculate standard R2 and MSE as proxies
-                    val_metric = sk_r2_score(y_val_np, y_pred_val)
-                    train_metric = sk_r2_score(y_train_np, y_pred_train)
-                    val_loss = mean_squared_error(y_val_np, y_pred_val)
-                    train_loss = mean_squared_error(y_train_np, y_pred_train)
-                    self.logger.warning("Cannot compute weighted_r2 for GBTs directly, reporting standard r2 instead.")
+                elif self.primary_metric == 'r2':
+                      val_metric = sk_r2_score(y_val_np, y_pred_val)
+                      train_metric = sk_r2_score(y_train_np, y_pred_train)
+                      val_loss = mean_squared_error(y_val_np, y_pred_val)
+                      train_loss = mean_squared_error(y_train_np, y_pred_train)
                 else: # Assume primary metric is mse
                      val_metric = mean_squared_error(y_val_np, y_pred_val)
                      train_metric = mean_squared_error(y_train_np, y_pred_train)

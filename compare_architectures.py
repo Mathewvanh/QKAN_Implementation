@@ -34,6 +34,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def count_parameters(model):
+    """Count the number of trainable parameters in a model"""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 class KANArchitectureTuner:
     """Class to compare different KAN architectures on the Jane Street dataset."""
     
@@ -142,64 +146,189 @@ class KANArchitectureTuner:
         
         return weighted_mse
     
-    def _train_architecture(self, model, architecture_name, config, num_epochs=20, lr=0.01):
-        """Train a model and evaluate its performance."""
-        model.train()
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        criterion = nn.MSELoss()
+    def _get_configs_for_architecture(self, arch_name):
+        """
+        Get all configurations to test for a specific architecture.
+        Optimized for laptop execution with fewer configurations.
         
-        # Training loop
-        train_losses = []
+        Args:
+            arch_name: Name of the architecture
+            
+        Returns:
+            List of configuration dictionaries
+        """
+        # Define optimized hyperparameters for laptop execution
+        hidden_sizes = [24, 28, 32]  # Three hidden sizes
+        learning_rates = [0.001, 0.005, 0.01, 0.05, 0.1]  # Five learning rates
+        
+        # Create configurations based on architecture
+        if arch_name == "CP-KAN" or arch_name == "OriginalKAN":
+            return [
+                {'hidden_size': hs, 'max_degree': md, 'hidden_degree': 5, 'learning_rate': lr}
+                for hs in hidden_sizes for md in [3, 5, 7] for lr in learning_rates
+            ]
+        elif arch_name == "SplineKAN":
+            return [
+                {'hidden_size': hs, 'k': k, 'learning_rate': lr}
+                for hs in hidden_sizes for k in [3, 4, 5] for lr in learning_rates
+            ]
+        elif arch_name == "WaveletKAN":
+            return [
+                {'hidden_size': hs, 'wavelet_type': wt, 'learning_rate': lr}
+                for hs in hidden_sizes for wt in ['mexican_hat', 'morlet', 'ricker'] for lr in learning_rates
+            ]
+        elif arch_name == "FourierKAN":
+            return [
+                {'hidden_size': hs, 'gridsize': gs, 'learning_rate': lr}
+                for hs in hidden_sizes for gs in [150, 200, 250] for lr in learning_rates
+            ]
+        elif arch_name == "JacobiKAN":
+            return [
+                {'hidden_size': hs, 'degree': d, 'a': 1.0, 'b': 1.0, 'learning_rate': lr}
+                for hs in hidden_sizes for d in [3, 4, 5] for lr in learning_rates
+            ]
+        elif arch_name == "ChebyshevKAN":
+            return [
+                {'hidden_size': hs, 'degree': d, 'learning_rate': lr}
+                for hs in hidden_sizes for d in [3, 4, 5] for lr in learning_rates
+            ]
+        elif arch_name == "TaylorKAN":
+            return [
+                {'hidden_size': hs, 'order': o, 'learning_rate': lr}
+                for hs in hidden_sizes for o in [3, 4, 5] for lr in learning_rates
+            ]
+        elif arch_name == "RBFKAN":
+            return [
+                {'hidden_size': hs, 'num_centers': nc, 'alpha': 1.0, 'learning_rate': lr}
+                for hs in hidden_sizes for nc in [20, 30, 40] for lr in learning_rates
+            ]
+        elif arch_name == "MixtureKAN":
+            return [
+                {'hidden_size': hs, 'experts_type': et, 'learning_rate': lr}
+                for hs in hidden_sizes for et in ["A", "B", "C"] for lr in learning_rates
+            ]
+        elif arch_name == "Transformer":
+            return [
+                {'hidden_size': hs, 'num_layers': nl, 'num_heads': nh, 'dropout': 0.1, 'learning_rate': lr}
+                for hs in hidden_sizes for nl in [1, 2, 3] for nh in [4, 8] for lr in learning_rates[:3]  # Less combinations for Transformer
+            ]
+        elif arch_name == "LSTM":
+            return [
+                {'hidden_size': hs, 'num_layers': nl, 'dropout': 0.1, 'bidirectional': bd, 'learning_rate': lr}
+                for hs in hidden_sizes for nl in [1, 2] for bd in [True, False] for lr in learning_rates[:3]  # Less combinations for LSTM
+            ]
+        else:
+            self.logger.warning(f"Unknown architecture: {arch_name}, using default configs")
+            return [{'hidden_size': hs, 'learning_rate': lr} for hs in hidden_sizes for lr in learning_rates]
+    
+    def _train_architecture(self, model, architecture_name, config, num_epochs=50, lr=0.01):
+        """Train a model architecture and return validation metrics."""
+        start_time = time.time()
+        results = {}
+        
+        # Move model to device
+        device = next(model.parameters()).device
+        
+        # Special handling for CP-KAN (display name)
+        display_arch_name = "CP-KAN" if architecture_name == "CP-KAN" else architecture_name
+        
+        # Set up optimizer
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        
+        # Move data to the appropriate device
+        x_train_device = self.x_train.to(device)
+        y_train_device = self.y_train.to(device)
+        w_train_device = self.w_train.to(device)
+        
+        x_val_device = self.x_val.to(device)
+        y_val_device = self.y_val.to(device)
+        w_val_device = self.w_val.to(device)
+        
+        # Training loop tracking
+        best_val_r2 = float('-inf')
+        best_val_mse = float('inf')
         val_r2_scores = []
         val_mse_scores = []
+        epochs_no_improve = 0
+        patience = 7  # Slightly increased early stopping patience
         
-        best_val_r2 = float('-inf')
+        # For storing the best model
         best_model_state = None
         
+        # Training loop
         for epoch in range(num_epochs):
-            # Train step
+            model.train()
             optimizer.zero_grad()
-            y_pred = model(self.x_train)
-            loss = criterion(y_pred, self.y_train)
+            
+            # Forward pass
+            outputs = model(x_train_device)
+            
+            # Compute weighted MSE loss
+            criterion = nn.MSELoss(reduction='none')
+            batch_losses = criterion(outputs, y_train_device)
+            
+            # Apply sample weights
+            if outputs.shape != w_train_device.shape:
+                # Handle broadcasting for multi-output models
+                weighted_losses = batch_losses * w_train_device.view(-1, 1)
+            else:
+                weighted_losses = batch_losses * w_train_device
+                
+            loss = weighted_losses.mean()
+            
+            # Backward pass and optimize
             loss.backward()
             optimizer.step()
             
-            train_losses.append(loss.item())
-            
-            # Validation step
+            # Validation
+            model.eval()
             with torch.no_grad():
-                model.eval()
-                val_pred = model(self.x_val)
-                val_r2 = self.weighted_r2(self.y_val, val_pred, self.w_val)
-                val_mse = self.weighted_mse(self.y_val, val_pred, self.w_val)
+                val_pred = model(x_val_device)
                 
-                val_r2_scores.append(val_r2)
-                val_mse_scores.append(val_mse)
+                # Calculate metrics (keeping them on device)
+                val_r2 = self.weighted_r2(y_val_device, val_pred, w_val_device)
+                val_mse = self.weighted_mse(y_val_device, val_pred, w_val_device)
+                
+                val_r2_scores.append(val_r2.item())
+                val_mse_scores.append(val_mse.item())
                 
                 # Log progress
-                if epoch % 5 == 0 or epoch == num_epochs - 1:
-                    self.logger.info(f"[{architecture_name}] Config={config} Epoch {epoch+1}/{num_epochs}, "
-                                    f"Train Loss={loss.item():.4f}, Val R²={val_r2:.4f}, Val MSE={val_mse:.6f}")
+                if epoch % 10 == 0 or epoch == num_epochs - 1:  # Log less frequently to reduce console output
+                    self.logger.info(f"[{display_arch_name}] Config={config} Epoch {epoch+1}/{num_epochs}, "
+                                   f"Train Loss={loss.item():.4f}, Val R²={val_r2.item():.4f}, Val MSE={val_mse.item():.6f}")
                 
                 # Save best model
-                if val_r2 > best_val_r2:
-                    best_val_r2 = val_r2
-                    best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
-                    self.logger.info(f"New best {architecture_name} model: R²={best_val_r2:.4f}")
+                if val_r2.item() > best_val_r2:
+                    best_val_r2 = val_r2.item()
+                    best_val_mse = val_mse.item()
+                    best_model_state = {k: v.cpu().detach() for k, v in model.state_dict().items()}
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
             
-            model.train()
+            # Early stopping
+            if epochs_no_improve >= patience:
+                self.logger.info(f"Early stopping triggered after {epoch+1} epochs")
+                break
         
-        # Load best model
+        # Restore best model
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
         
-        return {
-            'train_losses': train_losses,
-            'val_r2_scores': val_r2_scores,
-            'val_mse_scores': val_mse_scores,
+        # Final metrics
+        training_time = time.time() - start_time
+        
+        # Return results dictionary
+        results = {
             'best_val_r2': best_val_r2,
-            'best_val_mse': min(val_mse_scores)
+            'best_val_mse': best_val_mse,
+            'training_time': training_time,
+            'epochs_trained': epoch + 1,
+            'val_r2_history': val_r2_scores,
+            'val_mse_history': val_mse_scores
         }
+        
+        return results
     
     def _create_original_kan(self, hidden_size, max_degree, hidden_degree):
         """Create the original KAN model from our implementation."""
@@ -464,21 +593,33 @@ class KANArchitectureTuner:
     
     def _optimize_and_train(self, model, architecture_name, config, optimizer_method="Evolutionary", num_epochs=20):
         """Optimize the model architecture and then train it."""
-        # Apply the optimization method if it's the original KAN
+        # Apply the optimization method if it's the OriginalKAN
         start_time = time.time()
         
-        if architecture_name == "OriginalKAN":
+        # Set device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Move model to device explicitly
+        model = model.to(device)
+        
+        # Move data to device for optimization
+        x_train = self.x_train.to(device)
+        y_train = self.y_train.to(device)
+        
+        if architecture_name == "OriginalKAN" or architecture_name == "CP-KAN":
+            self.logger.info(f"Running {optimizer_method} optimization on {architecture_name}...")
             # Optimize using the selected method
             if optimizer_method == "QUBO":
-                model.optimize(self.x_train, self.y_train)
+                model.optimize(x_train, y_train)
             elif optimizer_method == "IntegerProgramming":
-                model.optimize_integer_programming(self.x_train, self.y_train)
+                model.optimize_integer_programming(x_train, y_train)
             elif optimizer_method == "Evolutionary":
-                model.optimize_evolutionary(self.x_train, self.y_train)
+                model.optimize_evolutionary(x_train, y_train)
             elif optimizer_method == "GreedyHeuristic":
-                model.optimize_greedy_heuristic(self.x_train, self.y_train)
+                model.optimize_greedy_heuristic(x_train, y_train)
             else:
                 raise ValueError(f"Unknown optimization method: {optimizer_method}")
+            self.logger.info(f"Optimization completed")
         
         optimization_time = time.time() - start_time
         
@@ -497,32 +638,32 @@ class KANArchitectureTuner:
             'param_count': param_count,
             'best_val_r2': results['best_val_r2'],
             'best_val_mse': results['best_val_mse'],
-            'train_losses': results['train_losses'],
-            'val_r2_scores': results['val_r2_scores'],
-            'val_mse_scores': results['val_mse_scores']
+            'train_losses': results.get('val_r2_history', []),  # Use val_r2_history if train_losses not available
+            'val_r2_scores': results.get('val_r2_history', results.get('val_r2_scores', [])),
+            'val_mse_scores': results.get('val_mse_history', results.get('val_mse_scores', []))
         }
         
         return config_with_results
     
-    def compare_architectures(self, num_epochs=20, optimization_method="Evolutionary", architectures_to_test=None):
+    def compare_architectures(self, num_epochs=50, optimization_method="Evolutionary", architectures_to_test=None):
         """Compare different KAN architectures."""
         self.logger.info(f"Starting architecture comparison with {optimization_method} optimization")
         
-        # Define configurations to test
-        hidden_sizes = [32, 64]
-        learning_rates = [0.01, 0.001]
+        # Define configurations to test - optimized for laptop
+        hidden_sizes = [24, 28, 32]  # Three hidden sizes
+        learning_rates = [0.001, 0.005, 0.01, 0.05, 0.1]  # Five learning rates
         
         # Store results
         all_results = []
         
         # Architecture tests to run
         architectures = [
-            # Original KAN (from our implementation)
+            # CP-KAN (from our implementation)
             {
                 'name': 'OriginalKAN',
                 'configs': [
-                    {'hidden_size': hs, 'max_degree': 5, 'hidden_degree': 3, 'learning_rate': lr}
-                    for hs in hidden_sizes for lr in learning_rates
+                    {'hidden_size': hs, 'max_degree': md, 'hidden_degree': 3, 'learning_rate': lr}
+                    for hs in hidden_sizes for md in [3, 4, 5] for lr in learning_rates
                 ],
                 'create_fn': self._create_original_kan
             },
@@ -531,7 +672,7 @@ class KANArchitectureTuner:
                 'name': 'SplineKAN',
                 'configs': [
                     {'hidden_size': hs, 'k': k, 'learning_rate': lr}
-                    for hs in hidden_sizes for k in [3, 5] for lr in learning_rates
+                    for hs in hidden_sizes for k in [3, 4, 5] for lr in learning_rates
                 ],
                 'create_fn': self._create_spline_kan
             },
@@ -540,7 +681,7 @@ class KANArchitectureTuner:
                 'name': 'WaveletKAN',
                 'configs': [
                     {'hidden_size': hs, 'wavelet_type': wt, 'learning_rate': lr}
-                    for hs in hidden_sizes for wt in ['mexican_hat', 'morlet'] for lr in learning_rates
+                    for hs in hidden_sizes for wt in ['mexican_hat', 'morlet', 'ricker'] for lr in learning_rates
                 ],
                 'create_fn': self._create_wavelet_kan
             },
@@ -549,7 +690,7 @@ class KANArchitectureTuner:
                 'name': 'FourierKAN',
                 'configs': [
                     {'hidden_size': hs, 'gridsize': gs, 'learning_rate': lr}
-                    for hs in hidden_sizes for gs in [200, 300] for lr in learning_rates
+                    for hs in hidden_sizes for gs in [150, 200, 250] for lr in learning_rates
                 ],
                 'create_fn': self._create_fourier_kan
             },
@@ -558,7 +699,7 @@ class KANArchitectureTuner:
                 'name': 'JacobiKAN',
                 'configs': [
                     {'hidden_size': hs, 'degree': d, 'a': 1.0, 'b': 1.0, 'learning_rate': lr}
-                    for hs in hidden_sizes for d in [3, 5] for lr in learning_rates
+                    for hs in hidden_sizes for d in [3, 4, 5] for lr in learning_rates
                 ],
                 'create_fn': self._create_jacobi_kan
             },
@@ -567,7 +708,7 @@ class KANArchitectureTuner:
                 'name': 'ChebyshevKAN',
                 'configs': [
                     {'hidden_size': hs, 'degree': d, 'learning_rate': lr}
-                    for hs in hidden_sizes for d in [3, 5] for lr in learning_rates
+                    for hs in hidden_sizes for d in [3, 4, 5] for lr in learning_rates
                 ],
                 'create_fn': self._create_chebyshev_kan
             },
@@ -576,7 +717,7 @@ class KANArchitectureTuner:
                 'name': 'TaylorKAN',
                 'configs': [
                     {'hidden_size': hs, 'order': o, 'learning_rate': lr}
-                    for hs in hidden_sizes for o in [3, 5] for lr in learning_rates
+                    for hs in hidden_sizes for o in [3, 4, 5] for lr in learning_rates
                 ],
                 'create_fn': self._create_taylor_kan
             },
@@ -585,7 +726,7 @@ class KANArchitectureTuner:
                 'name': 'RBFKAN',
                 'configs': [
                     {'hidden_size': hs, 'num_centers': nc, 'alpha': 1.0, 'learning_rate': lr}
-                    for hs in hidden_sizes for nc in [30, 50] for lr in learning_rates
+                    for hs in hidden_sizes for nc in [20, 30, 40] for lr in learning_rates
                 ],
                 'create_fn': self._create_rbf_kan
             },
@@ -594,7 +735,7 @@ class KANArchitectureTuner:
                 'name': 'MixtureKAN',
                 'configs': [
                     {'hidden_size': hs, 'experts_type': et, 'learning_rate': lr}
-                    for hs in hidden_sizes for et in ["A", "B"] for lr in learning_rates
+                    for hs in hidden_sizes for et in ["A", "B", "C"] for lr in learning_rates
                 ],
                 'create_fn': self._create_mixture_kan
             },
@@ -603,7 +744,7 @@ class KANArchitectureTuner:
                 'name': 'Transformer',
                 'configs': [
                     {'hidden_size': hs, 'num_layers': nl, 'num_heads': nh, 'dropout': 0.1, 'learning_rate': lr}
-                    for hs in hidden_sizes for nl in [2, 4] for nh in [4, 8] for lr in learning_rates
+                    for hs in hidden_sizes for nl in [1, 2, 3] for nh in [4, 8] for lr in learning_rates[:3]  # Less combinations for Transformer
                 ],
                 'create_fn': self._create_transformer_model
             },
@@ -612,7 +753,7 @@ class KANArchitectureTuner:
                 'name': 'LSTM',
                 'configs': [
                     {'hidden_size': hs, 'num_layers': nl, 'dropout': 0.1, 'bidirectional': bd, 'learning_rate': lr}
-                    for hs in hidden_sizes for nl in [1, 2] for bd in [True, False] for lr in learning_rates
+                    for hs in hidden_sizes for nl in [1, 2] for bd in [True, False] for lr in learning_rates[:3]  # Less combinations for LSTM
                 ],
                 'create_fn': self._create_lstm_model
             }
@@ -945,7 +1086,7 @@ def main():
                 architectures_to_test = ['OriginalKAN', 'WaveletKAN', 'FourierKAN']
                 logger.info("Running wavelet-based architectures subset")
             elif args.subset == 'fast':
-                architectures_to_test = ['OriginalKAN', 'TaylorKAN', 'RBFKAN']  # Quick for testing
+                architectures_to_test = ['OriginalKAN', 'LSTM', 'Transformer', 'RBFKAN']  # Quick for testing
                 logger.info("Running fast subset for testing")
             elif args.subset == 'all':
                 architectures_to_test = None  # All architectures
