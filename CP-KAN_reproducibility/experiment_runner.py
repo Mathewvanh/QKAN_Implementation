@@ -1157,6 +1157,118 @@ class ExperimentRunner:
         except Exception as e:
             self.logger.error(f"Failed to save degradation study results CSV: {e}")
 
+        # --- Plot Degradation Study Results --- 
+        self.plot_degradation_study_results(results_path) 
+
+    def plot_degradation_study_results(self, results_csv_path: str):
+        """Creates plots summarizing the degradation study results."""
+        self.logger.info(f"Generating plots for degradation study from: {results_csv_path}")
+        plot_dir = os.path.dirname(results_csv_path) # Save plots in the same dir as the CSV
+        
+        if not os.path.exists(results_csv_path):
+            self.logger.error(f"Results file not found: {results_csv_path}. Cannot generate plots.")
+            return
+            
+        try:
+            results_df = pd.read_csv(results_csv_path)
+        except Exception as e:
+            self.logger.error(f"Failed to read results CSV {results_csv_path}: {e}. Cannot plot.")
+            return
+            
+        if results_df.empty:
+            self.logger.warning("Degradation results DataFrame is empty. Skipping plotting.")
+            return
+            
+        # Check for required columns
+        required_cols = ['model_type', 'epoch', f'val_{self.primary_metric}', 'degradation_from_peak', 'grad_norm', 'weight_change']
+        missing_cols = [col for col in required_cols if col not in results_df.columns]
+        if missing_cols:
+            self.logger.error(f"Results CSV is missing required columns: {missing_cols}. Cannot plot.")
+            return
+            
+        model_types = results_df['model_type'].unique()
+        colors = plt.cm.viridis(np.linspace(0, 1, len(model_types)))
+        color_map = {mtype: colors[i] for i, mtype in enumerate(model_types)}
+        
+        fig, axes = plt.subplots(4, 1, figsize=(12, 18), sharex=True)
+        fig.suptitle(f"Degradation Study Analysis - {self.dataset_name}", fontsize=16, y=0.99)
+
+        # Plot 1: Validation Metric
+        ax = axes[0]
+        for model_type in model_types:
+            model_data = results_df[results_df['model_type'] == model_type]
+            if not model_data.empty:
+                ax.plot(model_data['epoch'], model_data[f'val_{self.primary_metric}'], 
+                        label=model_type, color=color_map[model_type], lw=1.5, alpha=0.9)
+                # Mark peak 
+                peak_idx = model_data[f'val_{self.primary_metric}'].idxmax() if self.higher_is_better else model_data[f'val_{self.primary_metric}'].idxmin()
+                if pd.notna(peak_idx) and peak_idx in model_data.index:
+                     peak_epoch = model_data.loc[peak_idx, 'epoch']
+                     peak_val = model_data.loc[peak_idx, f'val_{self.primary_metric}']
+                     ax.scatter(peak_epoch, peak_val, color=color_map[model_type], s=100, marker='*', 
+                                label=f'{model_type} Peak Ep {int(peak_epoch)}' if model_type not in ax.get_legend_handles_labels()[1] else None, 
+                                zorder=5)
+        ax.set_ylabel(f"Validation {self.primary_metric.upper()}")
+        ax.set_title("Validation Performance vs Epoch")
+        ax.grid(True, alpha=0.5)
+        ax.legend()
+
+        # Plot 2: Degradation from Peak
+        ax = axes[1]
+        for model_type in model_types:
+            model_data = results_df[results_df['model_type'] == model_type]
+            if not model_data.empty:
+                # Fill NaN degradation with 0, especially before the peak
+                ax.plot(model_data['epoch'], model_data['degradation_from_peak'].fillna(0), 
+                        label=model_type, color=color_map[model_type], lw=1.5, alpha=0.9)
+        ax.set_ylabel("Degradation from Peak")
+        ax.set_title("Performance Degradation vs Epoch")
+        ax.grid(True, alpha=0.5)
+        ax.legend()
+        ax.set_ylim(bottom=min(0, ax.get_ylim()[0])) # Ensure y starts at or below 0
+        
+        # Plot 3: Gradient Norm
+        ax = axes[2]
+        for model_type in model_types:
+            model_data = results_df[results_df['model_type'] == model_type]
+            if not model_data.empty and model_data['grad_norm'].notna().any(): # Check if any data exists
+                ax.plot(model_data['epoch'], model_data['grad_norm'], 
+                        label=model_type, color=color_map[model_type], lw=1.5, alpha=0.9)
+        ax.set_ylabel("Average Gradient Norm (L2)")
+        ax.set_title("Gradient Norm vs Epoch")
+        ax.grid(True, alpha=0.5)
+        ax.legend()
+        # Optional: Use log scale if values vary greatly
+        # if results_df['grad_norm'].max() / results_df['grad_norm'].min() > 100: ax.set_yscale('log')
+        
+        # Plot 4: Weight Change
+        ax = axes[3]
+        for model_type in model_types:
+            model_data = results_df[results_df['model_type'] == model_type]
+            if not model_data.empty and model_data['weight_change'].notna().any():
+                ax.plot(model_data['epoch'], model_data['weight_change'], 
+                        label=model_type, color=color_map[model_type], lw=1.5, alpha=0.9)
+        ax.set_ylabel("Weight Change Norm (L2)")
+        ax.set_title("Weight Change vs Epoch")
+        ax.set_xlabel("Epoch")
+        ax.grid(True, alpha=0.5)
+        ax.legend()
+        # Optional: Use log scale
+        # if results_df['weight_change'].max() / results_df['weight_change'].min() > 100: ax.set_yscale('log')
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.96]) # Adjust layout
+        
+        plot_filename = f'degradation_study_plots_{self.dataset_name}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png'
+        plot_path = os.path.join(plot_dir, plot_filename)
+        try:
+            plt.savefig(plot_path, bbox_inches='tight', dpi=150)
+            self.logger.info(f"Degradation study plots saved to {plot_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to save degradation plots: {e}")
+        finally:
+            plt.close(fig)
+            gc.collect()
+
     def _create_mlp(self, layers: List[int], activation: str) -> nn.Sequential:
         """Helper to create a simple MLP.
         

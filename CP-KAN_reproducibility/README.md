@@ -1,15 +1,18 @@
-# CP-KAN Optimization Comparison (Jane Street) - Reproducibility Package
+# CP-KAN / MLP Comparison & Degradation Study - Reproducibility Package
 
-This directory contains the code to reproduce the comparison of different polynomial degree optimization methods (QUBO, Integer Programming, Evolutionary Algorithm, Greedy Heuristic) for the Chebyshev Polynomial KAN (CP-KAN) model on the Jane Street Market Prediction dataset.
+This directory contains the code to run experiments comparing Fixed KAN models (with potential structure optimization like Greedy Heuristic) against standard MLPs. It also includes functionality to perform a follow-up degradation study on the best-performing models identified during a grid search.
 
 ## Files
 
-*   `CP_KAN.py`: Implementation of the `FixedKAN` model using Chebyshev polynomials and various degree optimization strategies.
-*   `data_pipeline_js_config.py`: Dataclasses for configuration related to the Jane Street data pipeline.
-*   `data_pipeline.py`: Implements the data loading, preprocessing (quantile normalization), and splitting logic for the Jane Street dataset using Polars.
-*   `optimization_tuner.py`: Class that orchestrates the hyperparameter grid search and comparison of optimization methods.
-*   `run_optimization_comparison.py`: The main script to execute the comparison experiment.
-*   `config_js_opt_comparison.yaml`: Configuration file defining data paths, experiment parameters, and hyperparameter grids.
+*   `main.py`: The main entry point script to run experiments based on a configuration file.
+*   `experiment_runner.py`: Contains the `ExperimentRunner` class that handles data loading, model initialization (FixedKAN, MLP, other KAN variants), grid search execution, single runs, degradation studies, training loops, metric calculation, and results saving/plotting.
+*   `CP_KAN.py`: Implementation of the `FixedKAN` model using Chebyshev polynomials and degree optimization strategies.
+*   `data_pipeline.py`: Implements data loading, preprocessing, and splitting for the Jane Street dataset using Polars.
+*   `data_pipeline_js_config.py`: Dataclasses for configuration related to the Jane Street data pipeline (`DataConfig`).
+*   `kanlayer_easytsf.py`: Contains implementations of various alternative KAN layers (Wavelet, Fourier, Jacobi, etc.) adapted from EasyTSF.
+*   `configs/`: Directory containing example YAML configuration files.
+    *   `config_js_grid_search_degradation.yaml`: Example config to run a grid search for KAN/MLP on Jane Street and automatically generate a config file for a follow-up degradation study.
+    *   `config_js_grid_search_degradation_short.yaml`: A shorter version for quick testing.
 *   `requirements.txt`: Required Python packages.
 *   `README.md`: This file.
 
@@ -24,48 +27,61 @@ This directory contains the code to reproduce the comparison of different polyno
 2.  **Create a Virtual Environment (Recommended)**
     ```bash
     python -m venv venv
-    source venv/bin/activate  # On Windows use `venv\\Scripts\\activate`
+    source venv/bin/activate  # On Windows use `venv\Scripts\activate`
     ```
 
 3.  **Install Dependencies**
     ```bash
     pip install -r requirements.txt
     ```
-    *Note: Installing `ortools` or `dwave-neal`/`pyqubo` might require specific system dependencies or build tools depending on your OS. Refer to their official installation guides if you encounter issues.*
+    *Note: Installing `ortools` or other optimization libraries might require specific system dependencies. Refer to their official installation guides if needed.* 
 
-4.  **Configure Data Path**
-    *   Edit `config_js_opt_comparison.yaml`.
-    *   Modify the `data_path` under the `data` section to point to the location of your `train.parquet` file (or directory containing the parquet dataset) for the Jane Street data. The current path is a placeholder: `~/Interning/Kaggle/jane_street_kaggle/...`.
+4.  **Configure Data Path in YAML**
+    *   Edit the desired configuration file in the `configs/` directory (e.g., `config_js_grid_search_degradation.yaml`).
+    *   Find the `data_path` key under the `dataset` section.
+    *   Replace the placeholder path (`"/path/to/your/jane_street/train.parquet/**/*.parquet"`) with the actual absolute path to your Jane Street `train.parquet` directory, ensuring you use the `/**/*.parquet` glob pattern to select only the necessary files.
 
-## Running the Experiment
+## Running Experiments
 
-The main script is `run_optimization_comparison.py`.
+The main script is `main.py`. You specify the experiment configuration using the `--config` argument.
 
 ```bash
-python run_optimization_comparison.py [options]
+# Ensure you are in the CP-KAN_reproducibility directory
+PYTHONPATH=$PWD python main.py --config <path_to_config_yaml>
 ```
 
-**Options:**
+**Workflow Examples:**
 
-*   `--config <path>`: Path to the configuration YAML file (default: `config_js_opt_comparison.yaml`).
-*   `--quick`: Use the smaller 'quick' hyperparameter grid defined in the config file for a faster test run.
-*   `--full`: Use the larger 'full' hyperparameter grid defined in the config file for a more comprehensive run.
-*   *(If neither --quick nor --full is specified, the 'default' grid from the config is used).*
+1.  **Grid Search followed by Degradation Study:**
+    *   **Stage 1:** Configure and run a grid search using a config like `configs/config_js_grid_search_degradation.yaml`. Ensure `experiment_type: grid_search` and `generate_degradation_config: true` are set.
+        ```bash
+        PYTHONPATH=$PWD python main.py --config configs/config_js_grid_search_degradation.yaml
+        ```
+        This will perform the grid search, save results, and generate a new config file (e.g., `config_degradation_study_generated.yaml`) inside the specified `results_dir`.
+    *   **Stage 2:** Run the degradation study using the *generated* config file.
+        ```bash
+        # Replace <results_dir> with the actual path from Stage 1 config
+        PYTHONPATH=$PWD python main.py --config <results_dir>/config_degradation_study_generated.yaml 
+        ```
+        This will load the best models found in Stage 1 and train them for longer, tracking degradation metrics.
 
-**Example:**
+2.  **Grid Search Only:**
+    *   Use a config with `experiment_type: grid_search` and set `generate_degradation_config: false` (or omit it).
 
-*   Run with the default grid:
-    ```bash
-    python run_optimization_comparison.py
-    ```
-*   Run with the quick grid for testing:
-    ```bash
-    python run_optimization_comparison.py --quick
-    ```
+3.  **Single Run (Not covered by example configs):**
+    *   Use a config with `experiment_type: single_run` and define specific model parameters under `model_params` instead of `parameter_grids`.
 
 ## Output
 
-*   **Logs:** A log file named `JaneStreet_OptimizationComparison_YYYYMMDD_HHMMSS.log` will be created in the `results_dir` specified in the config (default: `optimization_results_js`).
-*   **Results CSV:** A CSV file `optimization_comparison.csv` containing detailed metrics for each run will be saved in the `results_dir`.
-*   **Plots:** Comparison plots (R² vs. Epoch, Optimization Time, Final R²) will be saved as PNG files in the `results_dir`.
-*   **Best Models:** The best performing KAN model state (state dict and config) for each optimization method (based on validation R²) will be saved as `.pth` files (e.g., `kan_qubo_best.pth`) in the `results_dir`.
+Outputs are saved in the directory specified by `results_dir` in the configuration file.
+
+*   **Logs:** A `.log` file containing detailed execution logs.
+*   **Grid Search Results:**
+    *   A `_grid_search_comparison_...csv` file with metrics for every epoch of every run in the grid search.
+    *   Summary plots (`_final_...png`, `_perf_vs_params_...png`, etc.) comparing the best runs found.
+    *   If KAN was run, `optimized_kan_models/` subdirectory containing saved `.pth` files of the KAN models after the structure optimization step.
+*   **Degradation Study Results (if run):**
+    *   A `config_degradation_study_generated.yaml` file (generated after the grid search).
+    *   Inside a `degradation_study_results/` subdirectory:
+        *   A `degradation_study_...csv` file with detailed epoch-by-epoch metrics (including grad_norm, weight_change, degradation_from_peak).
+        *   A `degradation_study_plots_...png` file visualizing the degradation metrics over time.

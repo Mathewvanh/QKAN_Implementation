@@ -16,7 +16,9 @@ dataset:
   name: "jane_street"
   task_type: "regression"
   # Use glob pattern with the user's specified path
-  data_path: "~/Interning/Kaggle/jane_street_kaggle/jane-street-real-time-market-data-forecasting/train.parquet/**/*.parquet" # <<< Use user path + glob
+  # <<< IMPORTANT: Replace with the actual path to your Jane Street train.parquet directory >>>
+  # <<< Use glob pattern like /path/to/train.parquet/**/*.parquet to select only parquet files >>>
+  data_path: "/path/to/your/jane_street/train.parquet/**/*.parquet"  
   n_rows: 500000 # Number of rows to use
   train_ratio: 0.8
   feature_cols: "auto" # Use the auto-detection logic

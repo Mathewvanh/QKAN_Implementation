@@ -9,7 +9,9 @@ results_dir: ./js_grid_results_degradation_short # Separate results dir
 
 dataset:
   name: jane_street
-  data_path: "/Users/darklight/Interning/Kaggle/jane_street_kaggle/jane-street-real-time-market-data-forecasting/train.parquet/**/*.parquet"
+  # <<< IMPORTANT: Replace with the actual path to your Jane Street train.parquet directory >>>
+  # <<< Use glob pattern like /path/to/train.parquet/**/*.parquet to select only parquet files >>>
+  data_path: "/path/to/your/jane_street/train.parquet/**/*.parquet"
   n_rows: 50000 # Reduced rows for speed
   train_ratio: 0.7
   feature_cols: auto
