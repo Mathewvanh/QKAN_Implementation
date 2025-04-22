@@ -1,6 +1,6 @@
 # CP-KAN / MLP Comparison & Degradation Study - Reproducibility Package
 
-This directory contains the code to run experiments comparing Fixed KAN models (with potential structure optimization like Greedy Heuristic) against standard MLPs. It also includes functionality to perform a follow-up degradation study on the best-performing models identified during a grid search.
+This directory contains the code to run experiments comparing Fixed KAN models (with potential structure optimization like Greedy Heuristic) against standard MLPs and other KAN models. It also includes functionality to perform a follow-up degradation study on the best-performing models identified during a grid search.
 
 ## Files
 
@@ -52,20 +52,20 @@ The main script is `main.py`. You specify the experiment configuration using the
 python CP-KAN_reproducibility/main.py --config <path_to_config_yaml>
 ```
 
-*Note: The original README suggested `PYTHONPATH=$PWD python main.py` when running from within the `CP-KAN_reproducibility` directory. Running from the project root as shown above might be simpler if imports are set up correctly.* 
+
 
 **Workflow Examples:**
 
 1.  **Grid Search followed by Degradation Study:**
     *   **Stage 1:** Configure and run a grid search using a config like `configs/config_js_grid_search_degradation.yaml`. Ensure `experiment_type: grid_search` and `generate_degradation_config: true` are set.
         ```bash
-        PYTHONPATH=$PWD python main.py --config configs/config_js_grid_search_degradation.yaml
+        python main.py --config configs/config_js_grid_search_degradation.yaml
         ```
         This will perform the grid search, save results, and generate a new config file (e.g., `config_degradation_study_generated.yaml`) inside the specified `results_dir`.
     *   **Stage 2:** Run the degradation study using the *generated* config file.
         ```bash
         # Replace <results_dir> with the actual path from Stage 1 config
-        PYTHONPATH=$PWD python main.py --config <results_dir>/config_degradation_study_generated.yaml 
+        python main.py --config <results_dir>/config_degradation_study_generated.yaml 
         ```
         This will load the best models found in Stage 1 and train them for longer, tracking degradation metrics.
 
@@ -125,4 +125,4 @@ Here are commands to run the specific configurations prepared (assuming executio
 
 ## Output
 
-Outputs are saved in the directory specified by `
+Outputs are saved in the directory specified by the `results_dir` parameter in the configuration YAML file.
