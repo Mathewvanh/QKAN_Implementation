@@ -1,0 +1,57 @@
+# Configuration for the KAN vs MLP Degradation Analysis Experiment
+# This experiment trains KAN and MLP models using pre-defined hyperparameters
+# over an extended number of epochs to observe potential performance degradation.
+
+# IMPORTANT: The KAN and MLP configurations below are examples based on prior testing.
+# For the most meaningful analysis, replace the 'kan_config' and 'mlp_config'
+# sections below with the single *best* hyperparameter set found for each model type
+# during your initial grid search (e.g., from the 50-epoch run).
+
+experiment_type: degradation_analysis
+
+# --- Output & Logging ---
+output_dir: './results/degradation_analysis_js' # Directory to save metrics, plots, models
+logging_level: INFO # DEBUG, INFO, WARNING, ERROR
+log_file: 'degradation_analysis.log' # Log file within output_dir
+
+# --- Dataset Configuration (Jane Street) ---
+data_config:
+  data_path: "~/Interning/Kaggle/jane_street_kaggle/jane-street-real-time-market-data-forecasting/train.parquet/**/*.parquet"
+  n_rows: 200000       # Number of rows to load initially
+  train_ratio: 0.7     # Proportion for training set
+  feature_cols: "auto" # REMOVED - Pipeline will use default feature columns (e.g., feature_00-feature_78)
+  target_col: "responder_6"
+  weight_col: "weight"
+  date_col: "date_id"
+  # Preprocessing steps settings removed - Handled by DataPipeline internally
+  # imputation_strategy: 'median' 
+  # scaling_strategy: 'standard'  
+
+# --- KAN Model Configuration (Replace with your best grid search result) ---
+kan_config:
+  hidden_layers: [20]      # Example: Single hidden layer with 20 neurons
+  max_degree: 5            # Example: Max polynomial degree
+  complexity_weight: 0.0   # Typically 0 for comparison experiments
+  trainable_coefficients: True
+  skip_qubo_for_hidden: False
+  default_hidden_degree: 5 # Often same as max_degree
+
+# --- MLP Model Configuration (Replace with your best grid search result) ---
+mlp_config:
+  hidden_size: 24         # Example: Hidden layer size
+  depth: 3                # Example: Number of hidden layers
+  dropout_rate: 0.1       # Example: Dropout rate
+
+# --- Training Configuration ---
+training_config:
+  learning_rates: [1.0e-2, 1.0e-3, 1.0e-4, 1.0e-5] # LRs to test degradation across
+  num_epochs: 200         # Number of epochs for the degradation run
+  batch_size: 128         # Training batch size
+  eval_batch_size: 2048   # Batch size for R2 calculation (can be larger)
+  # Early stopping based on degradation (stops if val_r2 drops below threshold*peak for patience epochs)
+  early_stopping_patience: 50
+  early_stopping_threshold_ratio: 0.3 # e.g., stop if drops below 30% of peak R2
+
+# --- Plotting Configuration ---
+plotting_config:
+  plots_per_file: 3       # How many learning rate comparisons per plot file 

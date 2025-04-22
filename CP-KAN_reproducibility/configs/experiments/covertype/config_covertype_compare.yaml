@@ -1,0 +1,64 @@
+# CP-KAN_reproducibility/configs/experiments/covertype/config_covertype_compare.yaml
+# Configuration for Covertype Comparison (Appendix F)
+
+experiment_name: "Covertype_KAN_MLP_LGBM_Compare"
+random_seed: 42
+num_epochs: 50 # From Appendix F, Table 11 (Assume 50, not 500)
+results_dir: "results/covertype_compare"
+methods_to_run: ["FixedKAN", "MLP", "LightGBM"]
+
+dataset:
+  name: "forest_cover"
+  task_type: "classification"
+  data_path: "./data" # Default path
+  primary_metric: "accuracy"
+  num_classes: 7 # Labels 1-7 -> 0-6
+  validation_split: 0.2 # Standard split
+  optimize_sample_size: 10000 # For KAN optimize step
+
+# Parameter grids (using single values for KAN/MLP based on App F)
+parameter_grids:
+  FixedKAN: 
+    default: # Fixed params from Appendix F, Table 12
+      hidden_size: [ [64, 32] ] # Example shape aiming for ~10k params (Input=54, Output=7). (54*64+64 + 64*32+32 + 32*7+7)*Params_Per_Link? Needs KAN param logic.
+                                  # Let's use a simpler shape runner might handle [128]? Runner needs update to handle target_params. Setting manually for now.
+      # network_shape: [54, 128, 7] # Needs runner update
+      hidden_size: [[128]] # FixedKAN (54*128+128 + 128*7+7) * degree_coefs ~ 10k?
+      max_degree: [10]
+      complexity_weight: [0.0]
+      trainable_coefficients: [False]
+      default_hidden_degree: [2]
+      learning_rate: [0.001] # From App F Table 11
+
+  MLP: 
+    default: # Fixed params aiming for ~10k (App F, Table 12)
+      mlp_hidden_layers: [[64, 64]] # Example: (54*64+64) + (64*64+64) + (64*7+7) ~ 8k params. Let's try this.
+      mlp_activation: ['ReLU']
+      # mlp_batchnorm: [True] # Runner needs to handle these flags
+      # mlp_dropout: [0.1]   # Runner needs to handle these flags
+      learning_rate: [0.001]
+
+  LightGBM: 
+    default: # Fixed params from Appendix F, Table 13 (using defaults)
+      n_estimators: [100]
+      num_leaves: [31]
+      learning_rate: [0.1]
+
+# Fixed training settings (From Appendix F, Table 11)
+training:
+  batch_size: 4096 
+  optimizer: "Adam"
+  loss_function: "CrossEntropyLoss"
+  device: "auto"
+  early_stopping_patience: 10 # Reasonable default
+  gbt_early_stopping_rounds: 20 # Reasonable default
+
+logging:
+  log_dir: "logs/covertype_compare"
+  project_name: "QKAN_Covertype_Compare"
+  use_wandb: False
+
+plotting:
+  plot_results: True
+  plot_dir: "results/covertype_compare/plots"
+  metric_name: "Accuracy" 

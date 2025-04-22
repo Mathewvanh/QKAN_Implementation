@@ -326,35 +326,44 @@ class TestModelDegradation(unittest.TestCase):
                          index=False, float_format='%.6f')
 
     def test_plot_degradation_results(self):
-        """Create visualization of degradation patterns."""
+        """Create visualization of degradation patterns, split into two files."""
         if not os.path.exists('./results_degradation/degradation_metrics.csv'):
             self.skipTest("No results file found. Run degradation analysis first.")
         
         results = pd.read_csv('./results_degradation/degradation_metrics.csv')
         learning_rates = sorted(results['learning_rate'].unique())
+        num_lrs = len(learning_rates)
+        midpoint = math.ceil(num_lrs / 2) # Split point, ceil handles odd numbers
         
-        # Create figure with two rows of subplots per learning rate
-        fig = plt.figure(figsize=(15, 7*len(learning_rates)))
-        gs = plt.GridSpec(2*len(learning_rates), 1, height_ratios=[2, 1]*len(learning_rates))
+        # Get timestamp for filenames
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
+
+        # --- Figure 1: Lower Learning Rates --- 
+        num_lrs_part1 = midpoint
+        fig1 = plt.figure(figsize=(15, 7 * num_lrs_part1))
+        gs1 = plt.GridSpec(2 * num_lrs_part1, 1, height_ratios=[2, 1] * num_lrs_part1)
+        print(f"Generating plot part 1 (LRs: {learning_rates[:midpoint]})...")
         
-        for i, lr in enumerate(learning_rates):
+        for i in range(num_lrs_part1):
+            lr = learning_rates[i]
             lr_results = results[results['learning_rate'] == lr]
             
             # Main performance plot
-            ax1 = fig.add_subplot(gs[2*i])
+            ax1 = fig1.add_subplot(gs1[2*i])
             
-            # Plot KAN results
+            # Plot CP-KAN results
             kan_results = lr_results[lr_results['model_type'] == 'KAN']
             if len(kan_results) > 0:
                 kan_peak = kan_results['val_r2'].max()
                 kan_peak_epoch = kan_results.loc[kan_results['val_r2'].idxmax(), 'epoch']
                 kan_final = kan_results['val_r2'].iloc[-1]
-                kan_deg = (kan_peak - kan_final) / kan_peak * 100
+                # Prevent division by zero or near-zero if peak is close to 0
+                kan_deg = (kan_peak - kan_final) / abs(kan_peak) * 100 if abs(kan_peak) > 1e-9 else 0.0
                 
                 ax1.plot(kan_results['epoch'], kan_results['val_r2'],
-                        label=f'KAN (deg: {kan_deg:.1f}%)', color='blue', linewidth=2)
+                        label=f'CP-KAN (deg: {kan_deg:.1f}%)', color='blue', linewidth=2)
                 ax1.scatter(kan_peak_epoch, kan_peak, color='blue', s=100,
-                          marker='*', label='KAN Peak')
+                          marker='*', label='CP-KAN Peak')
             
             # Plot MLP results
             mlp_results = lr_results[lr_results['model_type'] == 'MLP']
@@ -362,14 +371,17 @@ class TestModelDegradation(unittest.TestCase):
                 mlp_peak = mlp_results['val_r2'].max()
                 mlp_peak_epoch = mlp_results.loc[mlp_results['val_r2'].idxmax(), 'epoch']
                 mlp_final = mlp_results['val_r2'].iloc[-1]
-                mlp_deg = (mlp_peak - mlp_final) / mlp_peak * 100
+                # Prevent division by zero or near-zero
+                mlp_deg = (mlp_peak - mlp_final) / abs(mlp_peak) * 100 if abs(mlp_peak) > 1e-9 else 0.0
                 
                 # Find early stopping point if it occurred
-                early_stop = mlp_results['epoch'].max() < 199
+                early_stop = mlp_results['epoch'].max() < 199 # Assuming 200 epochs total
                 if early_stop:
                     stop_epoch = mlp_results['epoch'].max()
                     ax1.axvline(x=stop_epoch, color='red', linestyle='--', alpha=0.3)
-                    ax1.text(stop_epoch+5, ax1.get_ylim()[0], 
+                    # Adjust text position based on axis limits
+                    y_pos = ax1.get_ylim()[0] + 0.05 * (ax1.get_ylim()[1] - ax1.get_ylim()[0])
+                    ax1.text(stop_epoch + 5, y_pos, 
                             f'Early stop\n{mlp_deg:.1f}% deg', 
                             color='red', alpha=0.7)
                 
@@ -379,17 +391,17 @@ class TestModelDegradation(unittest.TestCase):
                           marker='*', label='MLP Peak')
             
             ax1.set_title(f'Learning Rate: {lr:.1e}')
-            ax1.set_xlabel('Epoch')
+            # ax1.set_xlabel('Epoch') # Remove xlabel for top plots
             ax1.set_ylabel('Validation R²')
             ax1.grid(True, alpha=0.3)
             ax1.legend(loc='center right')
             
             # Degradation subplot
-            ax2 = fig.add_subplot(gs[2*i + 1])
+            ax2 = fig1.add_subplot(gs1[2*i + 1])
             
             if len(kan_results) > 0:
                 ax2.plot(kan_results['epoch'], kan_results['degradation_from_peak'],
-                        color='blue', linewidth=2, label='KAN')
+                        color='blue', linewidth=2, label='CP-KAN')
             
             if len(mlp_results) > 0:
                 ax2.plot(mlp_results['epoch'], mlp_results['degradation_from_peak'],
@@ -399,11 +411,96 @@ class TestModelDegradation(unittest.TestCase):
             ax2.set_ylabel('Degradation from Peak')
             ax2.grid(True, alpha=0.3)
             ax2.legend(loc='center right')
-        
+
         plt.tight_layout()
-        plt.savefig(f'./results_degradation/degradation_comparison_{datetime.now()}.png',
-                   bbox_inches='tight')
-        print("Degradation comparison plot saved.")
+        plot_path1 = f'./results_degradation/degradation_comparison_{timestamp}_part1_lowLR.png'
+        plt.savefig(plot_path1, bbox_inches='tight')
+        print(f"Degradation comparison plot (Part 1) saved to {plot_path1}")
+        plt.close(fig1) # Close the figure to free memory
+
+        # --- Figure 2: Higher Learning Rates --- 
+        num_lrs_part2 = num_lrs - midpoint
+        if num_lrs_part2 > 0:
+            fig2 = plt.figure(figsize=(15, 7 * num_lrs_part2))
+            gs2 = plt.GridSpec(2 * num_lrs_part2, 1, height_ratios=[2, 1] * num_lrs_part2)
+            print(f"Generating plot part 2 (LRs: {learning_rates[midpoint:]})...")
+
+            for i in range(num_lrs_part2):
+                lr_index = i + midpoint
+                lr = learning_rates[lr_index]
+                lr_results = results[results['learning_rate'] == lr]
+                
+                # Main performance plot
+                ax1 = fig2.add_subplot(gs2[2*i])
+                
+                # Plot CP-KAN results
+                kan_results = lr_results[lr_results['model_type'] == 'KAN']
+                if len(kan_results) > 0:
+                    kan_peak = kan_results['val_r2'].max()
+                    kan_peak_epoch = kan_results.loc[kan_results['val_r2'].idxmax(), 'epoch']
+                    kan_final = kan_results['val_r2'].iloc[-1]
+                    # Prevent division by zero or near-zero
+                    kan_deg = (kan_peak - kan_final) / abs(kan_peak) * 100 if abs(kan_peak) > 1e-9 else 0.0
+                    
+                    ax1.plot(kan_results['epoch'], kan_results['val_r2'],
+                            label=f'CP-KAN (deg: {kan_deg:.1f}%)', color='blue', linewidth=2)
+                    ax1.scatter(kan_peak_epoch, kan_peak, color='blue', s=100,
+                              marker='*', label='CP-KAN Peak')
+                
+                # Plot MLP results
+                mlp_results = lr_results[lr_results['model_type'] == 'MLP']
+                if len(mlp_results) > 0:
+                    mlp_peak = mlp_results['val_r2'].max()
+                    mlp_peak_epoch = mlp_results.loc[mlp_results['val_r2'].idxmax(), 'epoch']
+                    mlp_final = mlp_results['val_r2'].iloc[-1]
+                    # Prevent division by zero or near-zero
+                    mlp_deg = (mlp_peak - mlp_final) / abs(mlp_peak) * 100 if abs(mlp_peak) > 1e-9 else 0.0
+                    
+                    # Find early stopping point if it occurred
+                    early_stop = mlp_results['epoch'].max() < 199 # Assuming 200 epochs total
+                    if early_stop:
+                        stop_epoch = mlp_results['epoch'].max()
+                        ax1.axvline(x=stop_epoch, color='red', linestyle='--', alpha=0.3)
+                        # Adjust text position based on axis limits
+                        y_pos = ax1.get_ylim()[0] + 0.05 * (ax1.get_ylim()[1] - ax1.get_ylim()[0])
+                        ax1.text(stop_epoch + 5, y_pos, 
+                                f'Early stop\n{mlp_deg:.1f}% deg', 
+                                color='red', alpha=0.7)
+                    
+                    ax1.plot(mlp_results['epoch'], mlp_results['val_r2'],
+                            label=f'MLP (deg: {mlp_deg:.1f}%)', color='red', linewidth=2)
+                    ax1.scatter(mlp_peak_epoch, mlp_peak, color='red', s=100,
+                              marker='*', label='MLP Peak')
+                
+                ax1.set_title(f'Learning Rate: {lr:.1e}')
+                # ax1.set_xlabel('Epoch') # Remove xlabel for top plots
+                ax1.set_ylabel('Validation R²')
+                ax1.grid(True, alpha=0.3)
+                ax1.legend(loc='center right')
+                
+                # Degradation subplot
+                ax2 = fig2.add_subplot(gs2[2*i + 1])
+                
+                if len(kan_results) > 0:
+                    ax2.plot(kan_results['epoch'], kan_results['degradation_from_peak'],
+                            color='blue', linewidth=2, label='CP-KAN')
+                
+                if len(mlp_results) > 0:
+                    ax2.plot(mlp_results['epoch'], mlp_results['degradation_from_peak'],
+                            color='red', linewidth=2, label='MLP')
+                
+                ax2.set_xlabel('Epoch')
+                ax2.set_ylabel('Degradation from Peak')
+                ax2.grid(True, alpha=0.3)
+                ax2.legend(loc='center right')
+
+            plt.tight_layout()
+            plot_path2 = f'./results_degradation/degradation_comparison_{timestamp}_part2_highLR.png'
+            plt.savefig(plot_path2, bbox_inches='tight')
+            print(f"Degradation comparison plot (Part 2) saved to {plot_path2}")
+            plt.close(fig2) # Close the figure to free memory
+        else:
+            print("No higher learning rates found for Part 2 plot.")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

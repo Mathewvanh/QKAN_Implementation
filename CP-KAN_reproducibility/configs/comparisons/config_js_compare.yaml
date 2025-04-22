@@ -1,75 +1,118 @@
 # CP-KAN_reproducibility/configs/comparisons/config_js_compare.yaml
+# Configuration for KAN Architecture Comparison on Jane Street (Appendix C.4)
 
-experiment_name: "JaneStreet_KAN_Variants_Compare"
+experiment_name: "JaneStreet_KAN_Arch_Compare"
 random_seed: 42
-num_epochs: 30 # Moderate epochs for JS
-results_dir: "results/js_compare"
+num_epochs: 50 # Using default 50 epochs, Appendix C.4 doesn't specify
+results_dir: "results/js_kan_arch_compare"
 methods_to_run: 
-  - "LightGBM"
   - "FixedKAN"
-  - "MLP"
+  - "Original-KAN" # Placeholder name for SplineKAN from table
   - "WaveKAN"
   - "FourierKAN"
-  # Add other EasyTSF KANs as needed
+  - "JacobiKAN"
+  - "ChebyKAN"
+  - "TaylorKAN"
+  - "RBFKAN"
+  - "MLP"
+  # Removed LightGBM
 
 dataset:
   name: "jane_street"
   task_type: "regression"
-  # Use glob pattern with the user's specified path
   # <<< IMPORTANT: Replace with the actual path to your Jane Street train.parquet directory >>>
-  # <<< Use glob pattern like /path/to/train.parquet/**/*.parquet to select only parquet files >>>
   data_path: "/path/to/your/jane_street/train.parquet/**/*.parquet"  
-  n_rows: 500000 # Number of rows to use
-  train_ratio: 0.8
+  n_rows: 200000 # Consistent with other JS runs (Appendix C.1)
+  train_ratio: 0.7 # Consistent with other JS runs (Appendix C.1)
   feature_cols: "auto" # Use the auto-detection logic
   target_col: "responder_6" 
   weight_col: "weight" 
   date_col: "date_id"
   primary_metric: "weighted_r2" # Use competition metric
-  optimize_sample_size: 50000 # Subset for KAN optimize step
+  optimize_sample_size: 50000 # Keep optimize sample size
 
-# Grid search parameters, structured by model type
+# Grid search parameters, structured by model type (Matching Appendix C.4, Table 11)
 parameter_grids:
-  FixedKAN: 
+  FixedKAN: # CP-KAN in Table 11
     default:
-      max_degree: [3]
-      hidden_size: [64, 128] # JS has higher input dim (79)
-      learning_rate: [0.001, 0.0005]
-  MLP: 
+      hidden_size: [ [20] ] # Fixed Hidden Dims [20]
+      max_degree: [5, 7, 9]
+      complexity_weight: [0.05, 0.1, 0.2]
+      trainable_coefficients: [False, True]
+      skip_qubo_hidden: [False, True]
+      default_hidden_degree: [3, 4, 5]
+      learning_rate: [0.001] # Assumed base LR, not in grid
+
+  Original-KAN: # Spline KAN in Table 11
     default:
-      mlp_hidden_layers: [[128, 64], [256]] # Larger MLP layers
-      mlp_activation: ['ReLU']
-      learning_rate: [0.001, 0.0005]
-  LightGBM: 
-    default:
-      n_estimators: [100, 500]
-      num_leaves: [31, 61, 127] 
-      learning_rate: [0.05, 0.01]
-      # Add other relevant params like subsample, colsample_bytree
+      hidden_size: [ [16], [20], [24], [32] ]
+      spline_intervals: [3, 5, 7]
+      spline_order: [2, 3, 4]
+      learning_rate: [0.001]
+
   WaveKAN:
      default:
-       wavelet_type: ['mexican_hat', 'morlet']
-       learning_rate: [0.001, 0.0005]
+       hidden_size: [ [16], [20], [24], [32] ]
+       wavelet_type: ['mexican_hat'] # Fixed
+       # with_batch_norm: [True, False] # Runner needs BN flag handling for WaveKANLayer
+       learning_rate: [0.001]
+       
   FourierKAN:
      default:
-       fourier_gridsize: [10, 20]
-       learning_rate: [0.001, 0.0005]
+       hidden_size: [ [16], [20], [24], [32] ]
+       fourier_gridsize: [10, 20] # Assuming NaiveFourierKANLayer implementation
+       learning_rate: [0.001]
 
-# Fixed training settings
+  JacobiKAN:
+    default:
+      hidden_size: [ [16], [20], [24], [32] ]
+      jacobi_degree: [3, 5, 7] # Parameter 'Degree'
+      jacobi_a: [0.5, 1.0, 1.5] # Parameter 'a'
+      jacobi_b: [0.5, 1.0, 1.5] # Parameter 'b'
+      learning_rate: [0.001]
+      
+  ChebyKAN:
+    default:
+      hidden_size: [ [16], [20], [24], [32] ]
+      cheby_degree: [3, 5, 7, 9] # Parameter 'Degree'
+      learning_rate: [0.001]
+      
+  TaylorKAN:
+    default:
+      hidden_size: [ [16], [20], [24], [32] ]
+      taylor_order: [2, 3, 4, 5] # Parameter 'Order'
+      # add_bias: [True] # Fixed, Assuming TaylorKANLayer handles this
+      learning_rate: [0.001]
+
+  RBFKAN:
+    default:
+      hidden_size: [ [16], [20], [24], [32] ]
+      rbf_num_centers: [5, 10, 15, 20] # Parameter 'Num Centers'
+      rbf_alpha: [0.5, 1.0, 2.0] # Parameter 'Alpha (Shape Param)'
+      learning_rate: [0.001]
+
+  MLP:
+    default:
+      mlp_hidden_layers: [ [32], [64], [128], [32, 32], [64, 64] ] # Parameter 'Hidden Dims'
+      mlp_dropout: [0.1, 0.2, 0.3]
+      # use_batch_norm: [True, False] # Runner needs BN flag handling for MLP
+      learning_rate: [0.001] # Assumed base LR
+      mlp_activation: ['ReLU'] # Assuming default
+
+# Fixed training settings (Base LR 1e-3 mentioned in App C.4 text)
 training:
-  batch_size: 4096 # Larger batch size often used for JS
+  batch_size: 4096 # Keep JS default
   optimizer: "AdamW"
   loss_function: "MSELoss" # Regression loss
   device: "auto"
-  early_stopping_patience: 5 # For NNs
-  gbt_early_stopping_rounds: 20 # For LGBM
+  early_stopping_patience: 5 # Keep NN setting
 
 logging:
-  log_dir: "logs/js_compare"
-  project_name: "QKAN_JS_Compare"
+  log_dir: "logs/js_kan_arch_compare"
+  project_name: "QKAN_JS_ArchCompare"
   use_wandb: False
 
 plotting:
   plot_results: True
-  plot_dir: "results/js_compare/plots"
-  metric_name: "Weighted R2" # Plot competition metric 
+  plot_dir: "results/js_kan_arch_compare/plots"
+  metric_name: "Weighted R2" 

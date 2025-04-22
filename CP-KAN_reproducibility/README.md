@@ -46,9 +46,13 @@ This directory contains the code to run experiments comparing Fixed KAN models (
 The main script is `main.py`. You specify the experiment configuration using the `--config` argument.
 
 ```bash
-# Ensure you are in the CP-KAN_reproducibility directory
-PYTHONPATH=$PWD python main.py --config <path_to_config_yaml>
+# Ensure you are in the root QKAN_implementation directory
+# Use python -m CP-KAN_reproducibility.main if run from root, or cd first
+# Assuming execution from the root QKAN_implementation directory:
+python CP-KAN_reproducibility/main.py --config <path_to_config_yaml>
 ```
+
+*Note: The original README suggested `PYTHONPATH=$PWD python main.py` when running from within the `CP-KAN_reproducibility` directory. Running from the project root as shown above might be simpler if imports are set up correctly.* 
 
 **Workflow Examples:**
 
@@ -71,17 +75,54 @@ PYTHONPATH=$PWD python main.py --config <path_to_config_yaml>
 3.  **Single Run (Not covered by example configs):**
     *   Use a config with `experiment_type: single_run` and define specific model parameters under `model_params` instead of `parameter_grids`.
 
+**Specific Experiment Examples:**
+
+Here are commands to run the specific configurations prepared (assuming execution from the project root directory `/Users/darklight/Interning/Research/QKAN_implementation`):
+
+*   **MNIST Grid Search (KAN vs MLP):**
+    ```bash
+    python CP-KAN_reproducibility/main.py --config CP-KAN_reproducibility/configs/experiments/mnist/config_mnist_grid_search.yaml
+    ```
+
+*   **CIFAR-10 Grid Search (KAN vs MLP):**
+    ```bash
+    python CP-KAN_reproducibility/main.py --config CP-KAN_reproducibility/configs/experiments/cifar10/config_cifar10_grid_search.yaml
+    ```
+
+*   **Housing Grid Search (KAN vs MLP):**
+    ```bash
+    python CP-KAN_reproducibility/main.py --config CP-KAN_reproducibility/configs/experiments/housing/config_housing_grid_search.yaml
+    ```
+
+*   **Jane Street Single Run (Best KAN Config):**
+    ```bash
+    # Remember to update data_path in the config first!
+    python CP-KAN_reproducibility/main.py --config CP-KAN_reproducibility/configs/experiments/jane_street/config_js_single_run_best_kan.yaml
+    ```
+
+*   **Jane Street Optimization Method Comparison:**
+    ```bash
+    # Remember to update data_path in the config first!
+    python CP-KAN_reproducibility/main.py --config CP-KAN_reproducibility/configs/experiments/jane_street/config_js_opt_comparison.yaml
+    ```
+
+*   **Jane Street Grid Search for Degradation Study:**
+    ```bash
+    # This generates the config for the degradation study
+    python CP-KAN_reproducibility/main.py --config CP-KAN_reproducibility/configs/experiments/jane_street/config_js_grid_search_degradation.yaml
+    ```
+
+*   **Forest Covertype Comparison (KAN vs MLP vs LGBM):**
+    ```bash
+    python CP-KAN_reproducibility/main.py --config CP-KAN_reproducibility/configs/experiments/covertype/config_covertype_compare.yaml
+    ```
+
+*   **Jane Street KAN Architecture Comparison:**
+    ```bash
+    # Remember to update data_path in the config first!
+    python CP-KAN_reproducibility/main.py --config CP-KAN_reproducibility/configs/comparisons/config_js_compare.yaml
+    ```
+
 ## Output
 
-Outputs are saved in the directory specified by `results_dir` in the configuration file.
-
-*   **Logs:** A `.log` file containing detailed execution logs.
-*   **Grid Search Results:**
-    *   A `_grid_search_comparison_...csv` file with metrics for every epoch of every run in the grid search.
-    *   Summary plots (`_final_...png`, `_perf_vs_params_...png`, etc.) comparing the best runs found.
-    *   If KAN was run, `optimized_kan_models/` subdirectory containing saved `.pth` files of the KAN models after the structure optimization step.
-*   **Degradation Study Results (if run):**
-    *   A `config_degradation_study_generated.yaml` file (generated after the grid search).
-    *   Inside a `degradation_study_results/` subdirectory:
-        *   A `degradation_study_...csv` file with detailed epoch-by-epoch metrics (including grad_norm, weight_change, degradation_from_peak).
-        *   A `degradation_study_plots_...png` file visualizing the degradation metrics over time.
+Outputs are saved in the directory specified by `

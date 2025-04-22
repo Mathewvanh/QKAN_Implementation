@@ -131,7 +131,7 @@ class TestHouseSalesKANvsMLP(unittest.TestCase):
         # Simplified KAN config
         qkan_config = FixedKANConfig(
             network_shape=[self.input_dim, 20, 1],  # Single hidden layer
-            max_degree=7,                          # Lower degree for stability
+            max_degree=5,                          # Lower degree for stability
             complexity_weight=0.0,                # No regularization
             trainable_coefficients=True,          # Allow coefficient training
             skip_qubo_for_hidden=False,           # Use QUBO for hidden layer
@@ -294,7 +294,7 @@ class TestHouseSalesKANvsMLP(unittest.TestCase):
         kan_results = results[results['model_type'] == 'KAN']
         if len(kan_results) > 0:  # Only plot if we have KAN results
             plt.plot(kan_results['epoch'], kan_results['val_mse'], 
-                    label=f'KAN [{kan_results.iloc[0]["param_count"]} params]', 
+                    label=f'CP-KAN [{kan_results.iloc[0]["param_count"]} params]', 
                     color='blue', linewidth=2)
         
         # MLPs
@@ -307,7 +307,7 @@ class TestHouseSalesKANvsMLP(unittest.TestCase):
                         label=f'MLP-{depth} [{param_count} params]', 
                         color=color, linewidth=2)
         
-        plt.title("KAN vs MLP Depths: Validation MSE vs Epoch\nHouse Sales Regression (log-target)")
+        plt.title("CP-KAN vs MLP Depths: Validation MSE vs Epoch\\nHouse Sales Regression (log-target)")
         plt.xlabel("Epoch")
         plt.xlim(0, 50)  # Limit x-axis to 50 epochs
         plt.ylabel("MSE (log scale)")

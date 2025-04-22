@@ -1,0 +1,55 @@
+# Configuration for KAN Optimization Method Comparison on Jane Street (Appendix C.1)
+
+experiment_name: "JaneStreet_OptimMethodCompare"
+random_seed: 42
+num_epochs: 50 # Keep existing epochs
+results_dir: "results/js_optim_compare" # Updated results dir
+methods_to_run: ["FixedKAN"] # Only FixedKAN needed
+
+dataset:
+  name: "jane_street"
+  task_type: "regression"
+  # <<< IMPORTANT: Replace with the actual path to your Jane Street train.parquet directory >>>
+  data_path: "/path/to/your/jane_street/train.parquet/**/*.parquet"
+  n_rows: 200000 # Use 200k rows consistent with other JS experiments (App C.1 Table 4)
+  train_ratio: 0.7 # Use 0.7 train_ratio consistent with other JS experiments (App C.1 Table 4)
+  feature_cols: "auto"
+  target_col: "responder_6"
+  weight_col: "weight"
+  date_col: "date_id"
+  primary_metric: "weighted_r2"
+  optimize_sample_size: 50000 # Keep existing optimize sample size
+
+# Use structured parameter_grids
+parameter_grids:
+  FixedKAN: # Grid from Appendix C.1, Table 5
+    default:
+      max_degree: [3, 5, 7, 9]
+      hidden_size: [ [16], [20], [24], [32] ] # Ensure hidden_size is list of lists
+      default_hidden_degree: [3, 5, 7]
+      learning_rate: [0.01, 0.005, 0.001]
+      # Add other necessary FixedKAN params if runner requires them
+      trainable_coefficients: [True] # Assuming default
+      skip_qubo_hidden: [False]      # Assuming default
+    # Removed quick profile
+
+# List of KAN optimization methods to compare
+kan_optimize_methods: ["QUBO", "IntegerProgramming", "Evolutionary", "GreedyHeuristic"]
+
+# Fixed training settings
+training:
+  batch_size: 4096 # Keep existing batch size
+  optimizer: "AdamW"
+  loss_function: "MSELoss"
+  device: "auto"
+  early_stopping_patience: 5 # Keep existing
+
+logging:
+  log_dir: "logs/js_optim_compare"
+  project_name: "QKAN_JS_OptimCompare"
+  use_wandb: False
+
+plotting:
+  plot_results: True
+  plot_dir: "results/js_optim_compare/plots" # Updated plot dir
+  metric_name: "Weighted R2"

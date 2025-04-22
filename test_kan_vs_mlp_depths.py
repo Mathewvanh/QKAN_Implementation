@@ -297,6 +297,15 @@ class TestKANvsMLPDepths(unittest.TestCase):
         
         results = pd.read_csv(self.results_path)
         
+        # --- Debugging --- 
+        print("\n--- Debugging Plot Data ---")
+        print("Loaded data info:")
+        results.info()
+        print(f"Loaded data shape: {results.shape}")
+        print("First 5 rows of loaded data:")
+        print(results.head())
+        print("--- End Debugging ---\n")
+        
         # Skip plotting if no data
         if len(results) == 0:
             self.skipTest("Results file is empty. Run KAN and MLP tests first.")
@@ -309,7 +318,7 @@ class TestKANvsMLPDepths(unittest.TestCase):
         kan_results = results[results['model_type'] == 'KAN']
         if len(kan_results) > 0:  # Only plot if we have KAN results
             plt.plot(kan_results['epoch'], kan_results['val_r2'], 
-                    label=f'KAN [{kan_results.iloc[0]["param_count"]} params]', 
+                    label=f'CP-KAN [{kan_results.iloc[0]["param_count"]} params]', 
                     color='blue', linewidth=2)
         
         # MLPs
@@ -322,7 +331,7 @@ class TestKANvsMLPDepths(unittest.TestCase):
                         label=f'MLP-{depth} [{param_count} params]', 
                         color=color, linewidth=2)
         
-        plt.title("KAN vs MLP Depths: Validation R² vs Epoch\nJane Street Market Prediction")
+        plt.title("CP-KAN vs MLP Depths: Validation R² vs Epoch\nJane Street Market Prediction")
         plt.xlabel("Epoch")
         plt.xlim(0, 50)  # Limit x-axis to 50 epochs
         plt.ylabel("Weighted R²")
@@ -332,7 +341,7 @@ class TestKANvsMLPDepths(unittest.TestCase):
         
         # Save plot
         plt.savefig(f'./results_js/kan_vs_mlp_comparison_{datetime.now()}.png', bbox_inches='tight')
-        print("Comparison plot saved to: ./results_js/kan_vs_mlp_comparison.png")
+        print(f"Comparison plot saved to: ./results_js/kan_vs_mlp_comparison_{datetime.now()}.png")
 
     def test_4_alternative_optimization(self):
         """Compare different optimization methods for KAN."""

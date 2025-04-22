@@ -1,0 +1,56 @@
+# CP-KAN_reproducibility/configs/experiments/jane_street/config_js_single_run_best_kan.yaml
+# Configuration for a single run using the best CP-KAN config on Jane Street
+
+experiment_name: JS_SingleRun_BestKAN
+experiment_type: single_run # Set to single run
+random_seed: 42
+num_epochs: 50 # Default epochs
+results_dir: "results/js_singlerun_best_kan" # Specific results dir
+methods_to_run: 
+  - "FixedKAN" # Only run the specified best KAN
+
+dataset:
+  name: "jane_street"
+  task_type: "regression"
+  # <<< IMPORTANT: Replace with the actual path to your Jane Street train.parquet directory >>>
+  data_path: "/path/to/your/jane_street/train.parquet/**/*.parquet" # Kept placeholder
+  n_rows: 200000 # Updated rows from Appendix C.1, Table 4
+  train_ratio: 0.7 # Updated train_ratio from Appendix C.1, Table 4
+  feature_cols: "auto" 
+  target_col: "responder_6" 
+  weight_col: "weight" 
+  date_col: "date_id"
+  primary_metric: "weighted_r2" # From Appendix I
+  optimize_sample_size: 50000 # Keep optimize sample size
+
+# Removed parameter_grids section
+
+# Added model_params section for single run
+model_params:
+  model_type: FixedKAN # From Appendix C.3, Table 8
+  network_shape: [79, 20, 1] # Input: 79 features, Hidden: 20, Output: 1 (From Table 8)
+  max_degree: 5               # From Table 8
+  complexity_weight: 0.0      # From Table 8
+  trainable_coefficients: True # From Table 8
+  skip_qubo_hidden: False     # From Table 8
+  default_hidden_degree: 5    # From Table 8
+  learning_rate: 0.001       # Assumed best LR (Table 8 lists LR as variable for study)
+  kan_opt_method: 'QUBO'       # Implied as it's the main CP-KAN method
+
+# Fixed training settings
+training:
+  batch_size: 4096 # Large batch size from compare config / Appendix F Covertype
+  optimizer: "AdamW"
+  loss_function: "MSELoss" # Regression loss
+  device: "auto"
+  early_stopping_patience: 5 # Keep NN setting
+
+logging:
+  log_dir: "logs/js_singlerun_best_kan" # Specific log dir
+  project_name: "QKAN_JS_SingleRun"
+  use_wandb: False
+
+plotting:
+  plot_results: True
+  plot_dir: "results/js_singlerun_best_kan/plots" # Specific plot dir
+  metric_name: "Weighted R2" 

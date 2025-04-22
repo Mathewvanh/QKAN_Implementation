@@ -1,0 +1,62 @@
+# config_js_grid_search_degradation.yaml
+# Configuration for running grid search and generating degradation study config
+
+experiment_name: JaneStreet_GridSearch_For_Degradation
+experiment_type: grid_search # <<< Run grid search first
+generate_degradation_config: true # <<< Tell runner to generate the next config
+random_seed: 42
+results_dir: ./js_grid_results_degradation # <<< Specify results directory
+
+dataset:
+  name: jane_street
+  data_path: "/Users/darklight/Interning/Kaggle/jane_street_kaggle/jane-street-real-time-market-data-forecasting/train.parquet/" # <<< CHECK THIS PATH
+  n_rows: 200000 # Adjust as needed
+  train_ratio: 0.7 # Split for grid search training/validation
+  feature_cols: auto # Use 'auto' or provide specific list
+  target_col: "responder_6" # <<< CHECK THIS
+  weight_col: "weight" # <<< CHECK THIS
+  date_col: "date_id" # <<< CHECK THIS
+  primary_metric: weighted_r2 # Or 'r2' if not using weights
+
+# Define methods and grids for the initial grid search
+methods_to_run: ['FixedKAN', 'MLP']
+kan_optimize_methods: ['GreedyHeuristic'] # Optional: specify KAN opt methods
+
+parameter_grids:
+  FixedKAN: # Updated grid to match Appendix C.2, Table 7
+    default:
+      hidden_size: [ [16], [20], [24], [28] ] # From Table 7 Hidden Size
+      max_degree: [5, 7, 9]                # From Table 7 Max Degree
+      default_hidden_degree: [3, 5, 7]       # Added from Table 7 Hidden Degree
+      learning_rate: [0.01, 0.005]         # From Table 7 Learning Rate
+      trainable_coefficients: [True]       # Assuming default
+      skip_qubo_hidden: [False]            # Assuming default
+  MLP: # Updated grid to match Appendix C.2, Table 7
+    default:
+      # Combined Hidden Size {20, 24, 28} and Depth {2, 3, 4} from Table 7
+      mlp_hidden_layers: [ 
+          # HS 20
+          [20, 20], [20, 20, 20], [20, 20, 20, 20], 
+          # HS 24
+          [24, 24], [24, 24, 24], [24, 24, 24, 24],
+          # HS 28
+          [28, 28], [28, 28, 28], [28, 28, 28, 28]
+        ] 
+      mlp_dropout: [0.1, 0.15]             # Added from Table 7 Dropout
+      learning_rate: [0.01, 0.005]         # From Table 7 Learning Rate
+      mlp_activation: ['ReLU']             # Assuming default
+
+training: # Parameters for the grid search stage
+  num_epochs: 50   # <<< Shorter epochs for grid search
+  batch_size: 256
+  optimizer: Adam
+
+degradation_study_params: # <<< Parameters for the SECOND run (using the generated config)
+  num_epochs: 500  # <<< Longer epochs for degradation study
+  batch_size: 256  # Can be same or different
+  optimizer: Adam
+  # learning_rate: # Will be taken from the best model found in grid search
+  degradation_patience: 50
+  degradation_threshold_ratio: 0.3
+
+# plotting_config: {} # Optional 

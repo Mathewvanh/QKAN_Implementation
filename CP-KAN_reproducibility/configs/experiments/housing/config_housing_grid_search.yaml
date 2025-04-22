@@ -1,0 +1,57 @@
+# Configuration for KAN vs MLP Comparison on California Housing
+
+experiment_name: "Housing_GridSearch_KAN_MLP" # Updated name
+random_seed: 42
+num_epochs: 50 # Updated epochs
+results_dir: "results/housing_grid_search" # Updated results dir
+
+dataset:
+  name: "house_sales" # Changed name to match runner check/original file name
+  task_type: "regression" # Explicitly state task type
+  primary_metric: "r2" # Changed to r2 as requested
+  # Splitting params (used by _load_house_prices in runner)
+  test_split: 0.2
+  val_from_train_split: 0.2
+
+# Define methods and grids for the grid search
+methods_to_run: ['FixedKAN', 'MLP'] # Added MLP
+
+# Renamed parameter_grid to parameter_grids
+parameter_grids: 
+  FixedKAN: # CP-KAN grid from Appendix D, Table 9
+    default:
+      hidden_size: [ [20], [32], [64] ] # Reverted to hidden_size list
+      max_degree: [5, 7, 9, 11]
+      default_hidden_degree: [3, 5, 7, 9]
+      complexity_weight: [0.0, 0.001, 0.01]
+      learning_rate: [0.0001, 0.0005, 0.001]
+      trainable_coefficients: [True] # Assuming default
+      skip_qubo_hidden: [False]      # Assuming default
+
+  MLP: # MLP grid from Appendix D, Table 9
+    default:
+      mlp_hidden_layers: [ # Reverted to mlp_hidden_layers
+                       # Depth 2
+                       [32, 32], [64, 64], [128, 128],
+                       # Depth 3
+                       [32, 32, 32], [64, 64, 64], [128, 128, 128],
+                       # Depth 4
+                       [32, 32, 32, 32], [64, 64, 64, 64], [128, 128, 128, 128],
+                       # Depth 5
+                       [32, 32, 32, 32, 32], [64, 64, 64, 64, 64], [128, 128, 128, 128, 128]
+                     ]
+      mlp_dropout: [0.1, 0.2]
+      learning_rate: [0.0001, 0.001]
+      mlp_weight_decay: [0.0, 0.001]
+      batch_size: [64, 128, 256] # Batch size is part of MLP grid
+      mlp_activation: ['ReLU'] # Assuming default
+
+# Removed original parameter_grid structure
+# Removed KAN optimization methods comparison section
+
+# Added training section
+training:
+  batch_size: 64 # Default for KAN (MLP batch size is in its grid) - Appendix D
+  optimizer: "AdamW" # Common default
+  loss_function: "MSELoss" # Standard for regression
+  device: "auto" 

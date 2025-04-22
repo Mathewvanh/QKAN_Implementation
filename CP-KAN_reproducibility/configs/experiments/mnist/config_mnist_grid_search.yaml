@@ -1,0 +1,61 @@
+# CP-KAN_reproducibility/configs/comparisons/config_mnist_compare.yaml
+
+experiment_name: "MNIST_GridSearch_KAN_MLP"
+random_seed: 42
+num_epochs: 50
+results_dir: "results/mnist_grid_search"
+methods_to_run: 
+  - "FixedKAN"
+  - "MLP"
+  # - "XGBoost" # Removed
+  # - "LightGBM" # Removed
+  # - "WaveKAN" # Removed
+  # - "FourierKAN" # Removed
+
+dataset:
+  name: "mnist"
+  task_type: "classification"
+  data_path: "./data"
+  primary_metric: "accuracy"
+  num_classes: 10
+  optimize_sample_size: 5000
+
+# Grid search parameters, structured by model type
+parameter_grids:
+  FixedKAN:
+    default:
+      hidden_size: [ [64], [128], [32, 32] ]
+      max_degree: [3, 5, 7]
+      learning_rate: [0.001, 0.0003, 0.0001]
+      default_hidden_degree: [3]
+      complexity_weight: [0.01]
+      trainable_coefficients: [True]
+      skip_qubo_hidden: [False]
+  MLP:
+    default:
+      mlp_hidden_layers: [ [20, 20], [20, 20, 20], [20, 20, 20, 20],
+                         [24, 24], [24, 24, 24], [24, 24, 24, 24],
+                         [28, 28], [28, 28, 28], [28, 28, 28, 28] ]
+      mlp_dropout: [0.1, 0.15]
+      learning_rate: [0.01, 0.005]
+      mlp_activation: ['ReLU']
+
+# Removed other model grids (LightGBM, WaveKAN, FourierKAN, etc.)
+
+# Fixed training settings
+training:
+  batch_size: 64
+  optimizer: "AdamW"
+  loss_function: "CrossEntropyLoss"
+  device: "auto"
+  early_stopping_patience: 3
+
+logging:
+  log_dir: "logs/mnist_grid_search"
+  project_name: "QKAN_MNIST_Grid"
+  use_wandb: False
+
+plotting:
+  plot_results: True
+  plot_dir: "results/mnist_grid_search/plots"
+  metric_name: "Accuracy" 

@@ -1,0 +1,48 @@
+# Configuration for KAN vs MLP Comparison on CIFAR-10
+
+experiment_name: "CIFAR10_GridSearch_KAN_MLP" # Updated name
+random_seed: 42
+num_epochs: 50 # Correct epochs
+results_dir: "results/cifar10_grid_search" # Updated results dir
+
+dataset:
+  name: "cifar10"
+  task_type: "classification"
+  data_path: "./data" # Path where torchvision will download/look for CIFAR-10
+  primary_metric: "accuracy" # Default for classification
+  num_classes: 10 # Explicitly add num_classes
+
+# Define methods and grids for the grid search
+methods_to_run: ['FixedKAN', 'MLP'] # Added MLP
+
+# Renamed parameter_grid to parameter_grids
+parameter_grids: 
+  FixedKAN: # Using CP-KAN (QUBO) grid from Appendix E, Table 10
+    default:
+      hidden_size: [ [64], [128], [32, 32] ] # Reverted to hidden_size list
+      max_degree: [3, 5, 7]
+      learning_rate: [0.001, 0.0003, 0.0001]
+      # Fixed params from Table 10 for QUBO/IP/Evo/Greedy
+      default_hidden_degree: [3]
+      complexity_weight: [0.01]
+      trainable_coefficients: [True]
+      skip_qubo_hidden: [False] # Assuming default behavior
+
+  MLP: # Adapted from Jane Street MLP grid (Appendix C, Table 6)
+    default:
+      mlp_hidden_layers: [ [20, 20], [20, 20, 20], [20, 20, 20, 20], # Reverted to mlp_hidden_layers
+                         [24, 24], [24, 24, 24], [24, 24, 24, 24], # Reverted to mlp_hidden_layers
+                         [28, 28], [28, 28, 28], [28, 28, 28, 28] ] # Reverted to mlp_hidden_layers
+      mlp_dropout: [0.1, 0.15]
+      learning_rate: [0.01, 0.005]
+      mlp_activation: ['ReLU'] # Assuming default
+
+# Removed original parameter_grid structure
+# Removed KAN optimization methods comparison section
+
+# Added training section
+training:
+  batch_size: 64 # From Appendix C.4
+  optimizer: "AdamW" # Common default
+  loss_function: "CrossEntropyLoss" # Standard for classification
+  device: "auto" 
